@@ -1,0 +1,49 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "BTicino Hometouch Configuration",
+        "description": "Configure your BTicino Door Entry Touch intercom.\n\nExample username: user@email.com-MACADDRESS@123456.bs.iotleg.com\nExample domain: 123456.bs.iotleg.com\nExample gateway: SERIALNUMBER.bs.iotleg.com",
+        "data": {
+          "sip_server": "SIP Server",
+          "sip_port": "SIP Port",
+          "sip_username": "SIP Username",
+          "sip_password": "SIP Password",
+          "sip_domain": "SIP Domain",
+          "gateway_address": "Gateway Address",
+          "num_cameras": "Number of Outdoor Stations",
+          "num_locks": "Number of Locks"
+        }
+      },
+      "certificates": {
+        "title": "TLS Certificates",
+        "description": "Paste the contents of your decrypted certificate files.",
+        "data": {
+          "client_cert": "Client Certificate (PEM)",
+          "client_key": "Client Private Key (PEM)",
+          "ca_cert": "CA Certificate Chain (PEM)"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid authentication credentials",
+      "invalid_cert": "Invalid certificate format",
+      "cannot_connect": "Failed to connect to SIP server",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "This intercom is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "BTicino Hometouch Options",
+        "data": {
+          "num_cameras": "Number of Outdoor Stations",
+          "num_locks": "Number of Locks"
+        }
+      }
+    }
+  }
+}

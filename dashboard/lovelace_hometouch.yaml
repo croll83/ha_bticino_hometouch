@@ -1,0 +1,77 @@
+# BTicino Hometouch Dashboard Configuration
+# Copy this to your lovelace dashboards or include in configuration.yaml
+
+views:
+  - title: Videocitofono
+    path: hometouch
+    icon: mdi:doorbell-video
+    badges: []
+    cards:
+      # Main intercom panel - adapts to number of outdoor stations
+      - type: vertical-stack
+        cards:
+          # Header
+          - type: markdown
+            content: |
+              # 🏠 Videocitofono BTicino
+
+          # Single outdoor station layout
+          - type: custom:bticino-hometouch-card
+            camera_entity: camera.bticino_hometouch_outdoor_station_1
+            lock_entity: button.bticino_hometouch_unlock_door_1
+
+          # Connection status
+          - type: entities
+            entities:
+              - entity: binary_sensor.bticino_hometouch_connection
+                name: Stato Connessione
+                icon: mdi:lan-connect
+              - entity: binary_sensor.bticino_hometouch_doorbell
+                name: Campanello
+                icon: mdi:doorbell
+
+      # Alternative: Multiple outdoor stations (uncomment if needed)
+      # - type: horizontal-stack
+      #   cards:
+      #     - type: custom:bticino-hometouch-card
+      #       camera_entity: camera.bticino_hometouch_outdoor_station_1
+      #       lock_entity: button.bticino_hometouch_unlock_door_1
+      #
+      #     - type: custom:bticino-hometouch-card
+      #       camera_entity: camera.bticino_hometouch_outdoor_station_2
+      #       lock_entity: button.bticino_hometouch_unlock_door_2
+
+      # Conditional card for incoming call
+      - type: conditional
+        conditions:
+          - entity: binary_sensor.bticino_hometouch_doorbell
+            state: "on"
+        card:
+          type: vertical-stack
+          cards:
+            - type: markdown
+              content: |
+                ## 🔔 Chiamata in arrivo!
+
+            - type: picture-entity
+              entity: camera.bticino_hometouch_outdoor_station_1
+              camera_view: live
+              show_state: false
+              show_name: false
+
+            - type: horizontal-stack
+              cards:
+                - type: button
+                  entity: button.bticino_hometouch_answer_call
+                  name: Rispondi
+                  icon: mdi:phone
+
+                - type: button
+                  entity: button.bticino_hometouch_unlock_door_1
+                  name: Apri
+                  icon: mdi:door-open
+
+                - type: button
+                  entity: button.bticino_hometouch_hangup_call
+                  name: Rifiuta
+                  icon: mdi:phone-hangup

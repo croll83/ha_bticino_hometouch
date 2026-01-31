@@ -1,0 +1,12 @@
+{
+  "domain": "bticino_hometouch",
+  "name": "BTicino Hometouch",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/your-username/bticino_hometouch",
+  "iot_class": "cloud_push",
+  "issue_tracker": "https://github.com/your-username/bticino_hometouch/issues",
+  "requirements": ["cryptography>=41.0.0", "aiohttp>=3.8.0", "pyyaml>=6.0"],
+  "version": "1.0.0"
+}

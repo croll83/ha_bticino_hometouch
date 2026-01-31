@@ -1,0 +1,37 @@
+unlock_door:
+  name: Unlock Door
+  description: Unlock a door on the BTicino intercom system.
+  fields:
+    lock_id:
+      name: Lock ID
+      description: The ID of the lock to unlock (1, 2, or 3).
+      required: true
+      example: 1
+      selector:
+        number:
+          min: 1
+          max: 10
+          mode: slider
+
+answer_call:
+  name: Answer Call
+  description: Answer an incoming call from the intercom.
+
+hangup_call:
+  name: Hangup Call
+  description: Hangup the current call.
+
+switch_camera:
+  name: Switch Camera
+  description: Switch to a different camera during an active call.
+  fields:
+    camera_id:
+      name: Camera ID
+      description: The ID of the camera to switch to.
+      required: true
+      example: 1
+      selector:
+        number:
+          min: 1
+          max: 10
+          mode: slider
