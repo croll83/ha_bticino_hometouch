@@ -1,0 +1,51 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configurazione BTicino Hometouch",
+        "description": "Inserisci le credenziali del tuo account BTicino Door Entry.\n\nUsa la stessa email e password che usi nell'app Door Entry Touch.",
+        "data": {
+          "email": "Email",
+          "password": "Password",
+          "gateway_mac": "Indirizzo MAC del Gateway",
+          "num_cameras": "Numero di Posti Esterni",
+          "num_locks": "Numero di Serrature"
+        },
+        "data_description": {
+          "email": "La tua email dell'account BTicino",
+          "password": "La tua password dell'account BTicino",
+          "gateway_mac": "Indirizzo MAC del gateway (es. 00:03:50:B2:0E:1F)",
+          "num_cameras": "Quanti posti esterni/telecamere hai?",
+          "num_locks": "Quante serrature hai?"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Email o password non validi",
+      "cannot_connect": "Impossibile connettersi ai server BTicino o provisioning fallito",
+      "unknown": "Si e' verificato un errore imprevisto"
+    },
+    "abort": {
+      "already_configured": "Questo account e' gia' configurato"
+    },
+    "progress": {
+      "provisioning": "Connessione ai server BTicino e configurazione del dispositivo..."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opzioni BTicino Hometouch",
+        "description": "Modifica le impostazioni del dispositivo",
+        "data": {
+          "num_cameras": "Numero di Posti Esterni",
+          "num_locks": "Numero di Serrature",
+          "gateway_address": "Indirizzo IP Locale del Gateway (opzionale)"
+        },
+        "data_description": {
+          "gateway_address": "Indirizzo IP locale del gateway, se conosciuto"
+        }
+      }
+    }
+  }
+}

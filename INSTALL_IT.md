@@ -5,13 +5,12 @@ Questa guida ti mostrerà passo dopo passo come installare e configurare l'integ
 ## Indice
 
 1. [Prerequisiti](#prerequisiti)
-2. [Estrazione Certificati](#estrazione-certificati)
-3. [Installazione go2rtc](#installazione-go2rtc)
-4. [Installazione Integrazione](#installazione-integrazione)
-5. [Configurazione](#configurazione)
-6. [Dashboard](#dashboard)
-7. [Automazioni](#automazioni)
-8. [Risoluzione Problemi](#risoluzione-problemi)
+2. [Installazione go2rtc](#installazione-go2rtc)
+3. [Installazione Integrazione](#installazione-integrazione)
+4. [Configurazione](#configurazione)
+5. [Dashboard](#dashboard)
+6. [Automazioni](#automazioni)
+7. [Risoluzione Problemi](#risoluzione-problemi)
 
 ---
 
@@ -21,101 +20,29 @@ Questa guida ti mostrerà passo dopo passo come installare e configurare l'integ
 
 - Home Assistant 2024.1 o superiore
 - HACS (Home Assistant Community Store) - opzionale ma consigliato
-- File Manager o accesso SSH a Home Assistant
-- Python 3.10+ (per lo script di decriptazione)
+- go2rtc (per lo streaming video)
 
-### Dati Necessari dal tuo Videocitofono
+### Dati Necessari
 
-Avrai bisogno dei seguenti dati (estratti dall'app BTicino):
+Ti serviranno solo queste informazioni:
 
 | Dato | Esempio | Dove trovarlo |
 |------|---------|---------------|
-| SIP Username | `user@email.com-MACADDRESS@123456.bs.iotleg.com` | shared_prefs |
-| SIP Password | `password123` | Database (criptato) |
-| SIP Domain | `123456.bs.iotleg.com` | shared_prefs |
-| Gateway Address | `SERIALNUMBER.bs.iotleg.com` | Database |
-| Certificato Client | PEM file | Criptato in /files/certs/ |
-| Chiave Privata | PEM file | Criptato in /files/ |
-| Certificato CA | PEM file | Criptato in /files/certs/ |
-
----
-
-## Estrazione Certificati
-
-### Passo 1: Dump dei dati dall'app
-
-Se hai un dispositivo Android con root o un emulatore:
-
- - Installa l'app Door Entry for Hometouch (https://apkpure.com/door-entry-for-hometouch/com.bticino.doorentrytouch/download)
- - Effettua la Login con le tue credenziali valide. Se vedi che carica i posti esterni e le serrature, anche se crasha subito (per mancanza dei servizi Google), i dati sono stati già salvati sul device, continua.
-
-```bash
-# Con ADB e root access
-adb root
-adb pull /data/data/com.bticino.doorentrytouch/ ./bticino_dump/
-```
-
-La struttura sarà:
-```
-bticino_dump/
-├── shared_prefs/
-│   └── com.bticino.doorentrytouch_preferences.xml
-├── databases/
-│   └── plantSQLite
-└── files/
-    ├── config2.plant      # File chiave (128KB random)
-    ├── certs/
-    │   ├── *.cert.rsa     # Certificati criptati
-    │   └── *.cert.chain.rsa
-    └── private            # Chiave privata criptata
-```
-
-### Passo 2: Decriptazione
-
-Esegui lo script di decriptazione:
-
-```bash
-python3 decrypt_bticino_certs.py -c bticino_dump/files/config2.plant -d bticino_dump/files/certs/
-```
-
-Output:
-```
-[*] Extracting key from bticino_dump/files/config2.plant
-[*] Key offset calculated: XXXXX (65536 - YYY)
-[+] Key: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-[+] Mode: NEW
-
-[*] Processing: username.cert.rsa
-[+] Decrypted successfully!
-[+] Saved to: client.cert.pem
-
-[*] Processing: username.cert.chain.rsa
-[+] Decrypted successfully!
-[+] Saved to: client.chain.pem
-
-[*] Processing private key...
-[+] Private key decrypted!
-[+] Saved to: private.pem
-```
-
-### Passo 3: Verifica Certificati
-
-```bash
-# Verifica che certificato e chiave corrispondano
-openssl x509 -noout -modulus -in decrypted_certs/client.cert.pem | md5sum
-openssl rsa -noout -modulus -in decrypted_certs/private.pem | md5sum
-# I due hash devono essere identici
-```
+| Email BTicino | `tuonome@gmail.com` | La stessa email che usi nell'app Door Entry Touch |
+| Password BTicino | `password123` | La stessa password che usi nell'app Door Entry Touch |
+| MAC del Gateway | `00:03:50:B2:0E:1F` | Etichetta sul gateway o nell'app Door Entry Touch |
+| N. Posti Esterni | `1` | Conta i videocitofoni esterni |
+| N. Serrature | `2` | Conta le serrature controllabili |
 
 ---
 
 ## Installazione go2rtc
 
-go2rtc è necessario per convertire lo stream SRTP in RTSP/WebRTC.
+go2rtc e' necessario per convertire lo stream SRTP in WebRTC (video con audio bidirezionale).
 
 ### Opzione A: Add-on Home Assistant (Consigliato)
 
-1. Vai su **Settings → Add-ons → Add-on Store**
+1. Vai su **Settings -> Add-ons -> Add-on Store**
 2. Aggiungi repo https://github.com/AlexxIT/hassio-addons
 3. Cerca "go2rtc" e installalo
 4. Configura `/config/go2rtc.yaml`:
@@ -154,8 +81,8 @@ mv go2rtc_linux_amd64 /config/go2rtc/go2rtc
 ### Opzione A: HACS (Consigliato)
 
 1. Apri HACS in Home Assistant
-2. Vai su **Integrations → Menu (⋮) → Custom repositories**
-3. Aggiungi URL del repository GitHub
+2. Vai su **Integrations -> Menu (tre puntini) -> Custom repositories**
+3. Aggiungi l'URL del repository GitHub
 4. Categoria: Integration
 5. Cerca "BTicino Hometouch" e installa
 6. Riavvia Home Assistant
@@ -167,18 +94,9 @@ mv go2rtc_linux_amd64 /config/go2rtc/go2rtc
 ```bash
 # Via SCP
 scp -r custom_components/bticino_hometouch root@homeassistant:/config/custom_components/
-
-# Oppure via File Manager / Samba
 ```
 
-2. Copia la custom card:
-
-```bash
-# Copia in /config/www/
-scp www/bticino-hometouch-card.js root@homeassistant:/config/www/
-```
-
-3. Riavvia Home Assistant
+2. Riavvia Home Assistant
 
 ---
 
@@ -186,81 +104,99 @@ scp www/bticino-hometouch-card.js root@homeassistant:/config/www/
 
 ### Passo 1: Aggiungi l'Integrazione
 
-1. Vai su **Settings → Devices & Services → Add Integration**
+1. Vai su **Settings -> Devices & Services -> Add Integration**
 2. Cerca "BTicino Hometouch"
 3. Clicca su di esso
 
-### Passo 2: Inserisci le Credenziali
+### Passo 2: Inserisci i Dati
 
-**Schermata 1 - Dati SIP:**
+Inserisci le seguenti informazioni:
 
-| Campo | Valore |
-|-------|--------|
-| SIP Server | `sipserver.bs.iotleg.com` |
-| SIP Port | `5228` |
-| SIP Username | Il tuo username SIP completo |
-| SIP Password | Password decriptata dal database |
-| SIP Domain | Il tuo dominio (es. `123456.bs.iotleg.com`) |
-| Gateway Address | Indirizzo gateway (es. `SERIAL.bs.iotleg.com`) |
-| Number of Cameras | Numero di posti esterni (1-10) |
-| Number of Locks | Numero di serrature (1-10) |
+| Campo | Descrizione | Esempio |
+|-------|-------------|---------|
+| Email | La tua email dell'account BTicino | `tuonome@gmail.com` |
+| Password | La tua password dell'account BTicino | `password123` |
+| Indirizzo MAC Gateway | MAC address del tuo gateway | `00:03:50:B2:0E:1F` |
+| Numero di Posti Esterni | Quante telecamere/posti esterni hai | `1` |
+| Numero di Serrature | Quante serrature hai | `2` |
 
-**Schermata 2 - Certificati:**
+### Passo 3: Attendi il Provisioning
 
-Copia e incolla il contenuto dei file PEM:
+Clicca "Submit" e l'integrazione automaticamente:
 
-| Campo | File |
-|-------|------|
-| Client Certificate | `client.cert.pem` |
-| Client Private Key | `private.pem` |
-| CA Certificate Chain | `client.chain.pem` |
+1. Effettua il login ai server BTicino
+2. Scopre il tuo impianto e gateway
+3. Crea un nuovo dispositivo SIP chiamato "HomeAssistant"
+4. Genera e ottiene i certificati TLS
+5. Configura tutto automaticamente
 
-### Passo 3: Completa la Configurazione
+**Fatto!** Il tuo videocitofono e' pronto all'uso.
 
-Clicca "Submit" e attendi che l'integrazione si connetta.
+### Rinnovo Automatico Certificati
 
-Verifica nella pagina dell'integrazione:
-- ✅ Stato connessione: verde
-- ✅ Registrazione SIP: completata
+L'integrazione monitora automaticamente la scadenza dei certificati e li rinnova 30 giorni prima della scadenza. Non devi fare nulla!
 
 ---
 
 ## Dashboard
 
-### Passo 1: Registra la Custom Card
-
-Aggiungi al file `/config/configuration.yaml`:
-
-```yaml
-lovelace:
-  resources:
-    - url: /local/bticino-hometouch-card.js
-      type: module
-```
-
-Oppure via UI:
-1. Vai su **Settings → Dashboards → Resources**
-2. Aggiungi risorsa:
-   - URL: `/local/bticino-hometouch-card.js`
-   - Tipo: JavaScript Module
-
-### Passo 2: Crea la Dashboard
-
-**Configurazione base (1 posto esterno, 2 serrature):**
+### Dashboard Semplice
 
 ```yaml
 type: vertical-stack
 cards:
   # Titolo
   - type: markdown
-    content: "# 🏠 Videocitofono"
+    content: "# Videocitofono"
 
-  # Card interattiva
-  - type: custom:bticino-hometouch-card
-    camera_entity: camera.bticino_hometouch_outdoor_station_1
-    lock_entity: button.bticino_hometouch_unlock_door_1
+  # Telecamera
+  - type: picture-entity
+    entity: camera.bticino_hometouch_outdoor_station_1
+    camera_view: live
 
-  # Pulsanti serrature aggiuntive
+  # Pulsanti
+  - type: horizontal-stack
+    cards:
+      - type: button
+        entity: button.bticino_hometouch_unlock_door_1
+        name: Apri Porta
+        icon: mdi:door-open
+        show_state: false
+
+      - type: button
+        entity: button.bticino_hometouch_answer_call
+        name: Rispondi
+        icon: mdi:phone
+        show_state: false
+
+      - type: button
+        entity: button.bticino_hometouch_hangup_call
+        name: Chiudi
+        icon: mdi:phone-hangup
+        show_state: false
+
+  # Stato
+  - type: entities
+    entities:
+      - entity: binary_sensor.bticino_hometouch_connection
+        name: Connessione
+      - entity: binary_sensor.bticino_hometouch_doorbell
+        name: Campanello
+```
+
+### Dashboard con 2 Serrature
+
+```yaml
+type: vertical-stack
+cards:
+  - type: markdown
+    content: "# Videocitofono"
+
+  - type: picture-entity
+    entity: camera.bticino_hometouch_outdoor_station_1
+    camera_view: live
+
+  # Pulsanti serrature
   - type: horizontal-stack
     cards:
       - type: button
@@ -275,7 +211,22 @@ cards:
         icon: mdi:garage
         show_state: false
 
-  # Stato connessione
+  # Pulsanti chiamata
+  - type: horizontal-stack
+    cards:
+      - type: button
+        entity: button.bticino_hometouch_answer_call
+        name: Rispondi
+        icon: mdi:phone
+        show_state: false
+
+      - type: button
+        entity: button.bticino_hometouch_hangup_call
+        name: Chiudi
+        icon: mdi:phone-hangup
+        show_state: false
+
+  # Stato
   - type: entities
     entities:
       - entity: binary_sensor.bticino_hometouch_connection
@@ -284,61 +235,67 @@ cards:
         name: Campanello
 ```
 
-**Configurazione multi-camera (3 posti esterni):**
+### Dashboard Multi-Camera
 
 ```yaml
 type: vertical-stack
 cards:
   - type: markdown
-    content: "# 🏠 Videocitofono"
+    content: "# Videocitofono"
 
   - type: horizontal-stack
     cards:
-      - type: custom:bticino-hometouch-card
-        camera_entity: camera.bticino_hometouch_outdoor_station_1
-        lock_entity: button.bticino_hometouch_unlock_door_1
+      - type: picture-entity
+        entity: camera.bticino_hometouch_outdoor_station_1
+        camera_view: live
+        name: Posto Esterno 1
 
-      - type: custom:bticino-hometouch-card
-        camera_entity: camera.bticino_hometouch_outdoor_station_2
-        lock_entity: button.bticino_hometouch_unlock_door_2
+      - type: picture-entity
+        entity: camera.bticino_hometouch_outdoor_station_2
+        camera_view: live
+        name: Posto Esterno 2
 
-      - type: custom:bticino-hometouch-card
-        camera_entity: camera.bticino_hometouch_outdoor_station_3
-        lock_entity: button.bticino_hometouch_unlock_door_3
+  - type: horizontal-stack
+    cards:
+      - type: button
+        entity: button.bticino_hometouch_unlock_door_1
+        name: Porta 1
+        icon: mdi:door-open
+        show_state: false
+
+      - type: button
+        entity: button.bticino_hometouch_unlock_door_2
+        name: Porta 2
+        icon: mdi:door-open
+        show_state: false
 ```
 
 ---
 
 ## Automazioni
 
-### Popup Automatico su Chiamata
-
-Questa automazione apre automaticamente un popup con il video quando qualcuno suona:
+### Notifica su Campanello
 
 ```yaml
 automation:
-  - alias: "Videocitofono - Popup su chiamata"
+  - alias: "Videocitofono - Notifica campanello"
     trigger:
       - platform: event
         event_type: bticino_hometouch_incoming_call
     action:
-      - service: browser_mod.popup
+      - service: notify.mobile_app_your_phone
         data:
-          title: "🔔 Chiamata in arrivo"
-          content:
-            type: custom:bticino-hometouch-card
-            camera_entity: >
-              camera.bticino_hometouch_outdoor_station_{{ trigger.event.data.station_id }}
-            lock_entity: >
-              button.bticino_hometouch_unlock_door_{{ trigger.event.data.station_id }}
-          size: wide
-          dismissable: false
-          timeout: 60000
-        target:
-          device_id: all
+          title: "Campanello"
+          message: "Qualcuno ha suonato al videocitofono"
+          data:
+            actions:
+              - action: "UNLOCK_DOOR"
+                title: "Apri"
+              - action: "DISMISS"
+                title: "Ignora"
 ```
 
-### Notifica su Companion App
+### Notifica con Azioni Complete
 
 ```yaml
 automation:
@@ -349,19 +306,19 @@ automation:
     action:
       - service: notify.mobile_app_your_phone
         data:
-          title: "🔔 Videocitofono"
-          message: "Chiamata dal posto esterno {{ trigger.event.data.station_id }}"
+          title: "Videocitofono"
+          message: "Chiamata in arrivo"
           data:
             tag: hometouch_call
             group: hometouch
             actions:
               - action: "ANSWER"
-                title: "📞 Rispondi"
+                title: "Rispondi"
                 activationMode: "foreground"
               - action: "UNLOCK"
-                title: "🔓 Apri"
+                title: "Apri"
               - action: "REJECT"
-                title: "❌ Rifiuta"
+                title: "Rifiuta"
                 destructive: true
             push:
               sound:
@@ -409,31 +366,47 @@ automation:
                   entity_id: button.bticino_hometouch_hangup_call
 ```
 
+### Popup su Browser (richiede browser_mod)
+
+```yaml
+automation:
+  - alias: "Videocitofono - Popup su chiamata"
+    trigger:
+      - platform: event
+        event_type: bticino_hometouch_incoming_call
+    action:
+      - service: browser_mod.popup
+        data:
+          title: "Chiamata in arrivo"
+          content:
+            type: picture-entity
+            entity: camera.bticino_hometouch_outdoor_station_1
+            camera_view: live
+          size: wide
+          dismissable: false
+          timeout: 60000
+        target:
+          device_id: all
+```
+
 ---
 
 ## Risoluzione Problemi
 
-### Problema: "SIP client not registered"
+### "Email o password non validi"
 
-**Causa:** La connessione al server SIP non è riuscita.
+- Verifica di usare le stesse credenziali dell'app Door Entry Touch
+- Prova a fare logout/login nell'app per verificare che funzionino
 
-**Soluzioni:**
-1. Verifica che i certificati siano corretti
-2. Controlla che la porta 5228 sia raggiungibile
-3. Verifica le credenziali SIP
+### "Impossibile connettersi ai server BTicino"
 
-```bash
-# Test connessione
-openssl s_client -connect sipserver.bs.iotleg.com:5228 \
-  -cert client.cert.pem -key private.pem -CAfile client.chain.pem
-```
+- Verifica la connessione internet
+- I server BTicino potrebbero essere temporaneamente non disponibili
+- Riprova piu' tardi
 
-### Problema: Video non funziona
+### Video non funziona
 
-**Causa:** go2rtc non è configurato correttamente.
-
-**Soluzioni:**
-1. Verifica che go2rtc sia in esecuzione
+1. Verifica che go2rtc sia installato e in esecuzione
 2. Controlla i log di go2rtc
 3. Verifica che le porte 8554 e 8555 siano aperte
 
@@ -442,18 +415,14 @@ openssl s_client -connect sipserver.bs.iotleg.com:5228 \
 curl http://localhost:1984/api/streams
 ```
 
-### Problema: Audio non funziona
+### Audio non funziona
 
-**Causa:** WebRTC non negoziato correttamente.
-
-**Soluzioni:**
 1. Verifica che il browser supporti WebRTC
 2. Controlla i permessi del microfono
 3. Usa HTTPS (WebRTC richiede connessione sicura)
 
-### Problema: Notifiche non arrivano
+### Notifiche non arrivano
 
-**Soluzioni:**
 1. Verifica la configurazione della Companion App
 2. Controlla che il servizio notify sia disponibile
 3. Verifica i permessi delle notifiche sul dispositivo
@@ -471,9 +440,9 @@ logger:
 
 ---
 
-## Note sulla Configurazione Multi-Impianto
+## Note sulla Configurazione
 
-Ogni impianto BTicino può avere configurazioni diverse:
+Ogni impianto BTicino puo' avere configurazioni diverse:
 
 | Scenario | Posti Esterni | Serrature |
 |----------|---------------|-----------|
@@ -495,4 +464,4 @@ Imposta correttamente il numero di posti esterni e serrature durante la configur
 
 ## Note Legali
 
-Questa integrazione è fornita "così com'è" per uso personale. BTicino è un marchio registrato di Legrand. Questa integrazione non è affiliata con BTicino o Legrand.
+Questa integrazione e' fornita "cosi' com'e'" per uso personale. BTicino e' un marchio registrato di Legrand. Questa integrazione non e' affiliata con BTicino o Legrand.

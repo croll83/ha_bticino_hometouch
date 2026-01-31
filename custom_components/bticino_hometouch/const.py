@@ -2,7 +2,14 @@
 
 DOMAIN = "bticino_hometouch"
 
-# Configuration keys
+# Configuration keys - User input (simple setup)
+CONF_EMAIL = "email"
+CONF_PASSWORD = "password"
+CONF_GATEWAY_MAC = "gateway_mac"
+CONF_NUM_CAMERAS = "num_cameras"
+CONF_NUM_LOCKS = "num_locks"
+
+# Configuration keys - Auto-discovered/generated
 CONF_SIP_SERVER = "sip_server"
 CONF_SIP_PORT = "sip_port"
 CONF_SIP_USERNAME = "sip_username"
@@ -12,14 +19,25 @@ CONF_GATEWAY_ADDRESS = "gateway_address"
 CONF_CLIENT_CERT = "client_cert"
 CONF_CLIENT_KEY = "client_key"
 CONF_CA_CERT = "ca_cert"
-CONF_NUM_CAMERAS = "num_cameras"
-CONF_NUM_LOCKS = "num_locks"
 CONF_LOCK_COMMANDS = "lock_commands"
 
+# Auto-provisioning data
+CONF_PLANT_ID = "plant_id"
+CONF_GATEWAY_ID = "gateway_id"
+CONF_SIP_ACCOUNT = "sip_account"
+CONF_DEVICE_ID = "device_id"
+CONF_CERT_EXPIRY = "cert_expiry"
+
 # Default values
+DEFAULT_SIP_SERVER = "sipserver.bs.iotleg.com"
 DEFAULT_SIP_PORT = 5228
 DEFAULT_NUM_CAMERAS = 1
 DEFAULT_NUM_LOCKS = 1
+DEFAULT_DEVICE_NAME = "HomeAssistant"
+
+# BTicino API
+BTICINO_API_BASE = "https://www.myhomeweb.com"
+BTICINO_API_PORT = 443
 
 # Lock command types based on CID (from decompiled app)
 # CID 10060 or 3008 -> commands *8*19 and *8*20
@@ -54,3 +72,6 @@ SERVICE_SWITCH_CAMERA = "switch_camera"
 ATTR_LOCK_ID = "lock_id"
 ATTR_CAMERA_ID = "camera_id"
 ATTR_CALLER_ID = "caller_id"
+
+# Certificate renewal
+CERT_RENEWAL_DAYS_BEFORE_EXPIRY = 30

@@ -7,39 +7,49 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import config_validation as cv
 
 from .const import (
     DOMAIN,
+    CONF_EMAIL,
+    CONF_PASSWORD,
+    CONF_GATEWAY_MAC,
+    CONF_NUM_CAMERAS,
+    CONF_NUM_LOCKS,
     CONF_SIP_SERVER,
     CONF_SIP_PORT,
     CONF_SIP_USERNAME,
     CONF_SIP_PASSWORD,
     CONF_SIP_DOMAIN,
+    CONF_SIP_ACCOUNT,
     CONF_GATEWAY_ADDRESS,
     CONF_CLIENT_CERT,
     CONF_CLIENT_KEY,
     CONF_CA_CERT,
-    CONF_NUM_CAMERAS,
-    CONF_NUM_LOCKS,
+    CONF_PLANT_ID,
+    CONF_GATEWAY_ID,
+    CONF_DEVICE_ID,
+    CONF_CERT_EXPIRY,
     CONF_LOCK_COMMANDS,
+    DEFAULT_SIP_SERVER,
     DEFAULT_SIP_PORT,
     DEFAULT_NUM_CAMERAS,
     DEFAULT_NUM_LOCKS,
 )
+from .bticino_api import BticinoApi, BticinoAuthError, BticinoProvisioningError
 
 _LOGGER = logging.getLogger(__name__)
 
+
+# Simple setup schema - just email, password, MAC, and device counts
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_SIP_SERVER, default="sipserver.bs.iotleg.com"): str,
-        vol.Required(CONF_SIP_PORT, default=DEFAULT_SIP_PORT): int,
-        vol.Required(CONF_SIP_USERNAME): str,
-        vol.Required(CONF_SIP_PASSWORD): str,
-        vol.Required(CONF_SIP_DOMAIN): str,
-        vol.Required(CONF_GATEWAY_ADDRESS): str,
+        vol.Required(CONF_EMAIL): str,
+        vol.Required(CONF_PASSWORD): str,
+        vol.Required(CONF_GATEWAY_MAC): str,
         vol.Required(CONF_NUM_CAMERAS, default=DEFAULT_NUM_CAMERAS): vol.All(
             vol.Coerce(int), vol.Range(min=1, max=10)
         ),
@@ -49,32 +59,71 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
     }
 )
 
-STEP_CERTS_DATA_SCHEMA = vol.Schema(
-    {
-        vol.Required(CONF_CLIENT_CERT): str,
-        vol.Required(CONF_CLIENT_KEY): str,
-        vol.Required(CONF_CA_CERT): str,
+
+async def validate_and_provision(
+    hass: HomeAssistant, data: dict[str, Any]
+) -> dict[str, Any]:
+    """Validate credentials and provision the device."""
+    email = data[CONF_EMAIL]
+    password = data[CONF_PASSWORD]
+
+    _LOGGER.info("Starting BTicino provisioning for %s", email)
+
+    async with BticinoApi(email, password) as api:
+        try:
+            result = await api.provision_device(
+                gateway_mac=data.get(CONF_GATEWAY_MAC),
+                device_name="HomeAssistant",
+            )
+        except BticinoAuthError as err:
+            _LOGGER.error("Authentication failed: %s", err)
+            raise InvalidAuth from err
+        except BticinoProvisioningError as err:
+            _LOGGER.error("Provisioning failed: %s", err)
+            raise CannotConnect from err
+
+    _LOGGER.info(
+        "Provisioning successful. Plant: %s, Gateway: %s, SIP: %s",
+        result.plant_id,
+        result.gateway_id,
+        result.sip_account,
+    )
+
+    # Return full configuration
+    return {
+        # User input (stored for re-provisioning/renewal)
+        CONF_EMAIL: email,
+        CONF_PASSWORD: password,
+        CONF_GATEWAY_MAC: data.get(CONF_GATEWAY_MAC, ""),
+        CONF_NUM_CAMERAS: data[CONF_NUM_CAMERAS],
+        CONF_NUM_LOCKS: data[CONF_NUM_LOCKS],
+        # Provisioned data
+        CONF_PLANT_ID: result.plant_id,
+        CONF_GATEWAY_ID: result.gateway_id,
+        CONF_SIP_ACCOUNT: result.sip_account,
+        CONF_DEVICE_ID: result.device_id,
+        # SIP configuration
+        CONF_SIP_SERVER: DEFAULT_SIP_SERVER,
+        CONF_SIP_PORT: DEFAULT_SIP_PORT,
+        CONF_SIP_USERNAME: result.sip_username,
+        CONF_SIP_PASSWORD: result.sip_password,
+        CONF_SIP_DOMAIN: result.sip_domain,
+        # Certificates
+        CONF_CLIENT_CERT: result.client_cert,
+        CONF_CLIENT_KEY: result.client_key,
+        CONF_CA_CERT: result.ca_cert,
+        CONF_CERT_EXPIRY: result.cert_expiry.isoformat(),
+        # Lock commands (default to type A)
+        CONF_LOCK_COMMANDS: ["A"] * data[CONF_NUM_LOCKS],
+        # Gateway address placeholder (will be discovered or set later)
+        CONF_GATEWAY_ADDRESS: data.get(CONF_GATEWAY_MAC, ""),
     }
-)
-
-
-async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
-    """Validate the user input allows us to connect."""
-    # Basic validation
-    if not data[CONF_SIP_USERNAME]:
-        raise InvalidAuth("Username is required")
-
-    if not data[CONF_SIP_PASSWORD]:
-        raise InvalidAuth("Password is required")
-
-    # Return info to store in the config entry
-    return {"title": f"BTicino Hometouch ({data[CONF_SIP_DOMAIN]})"}
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for BTicino Hometouch."""
 
-    VERSION = 1
+    VERSION = 2  # Incremented version for new config format
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -83,74 +132,109 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle the initial step."""
+        """Handle the initial step - simple setup with email, password, MAC."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            # Check if already configured with this email
+            await self.async_set_unique_id(user_input[CONF_EMAIL].lower())
+            self._abort_if_unique_id_configured()
+
             try:
-                info = await validate_input(self.hass, user_input)
+                # Validate and provision
+                self._data = await validate_and_provision(self.hass, user_input)
+
             except InvalidAuth:
                 errors["base"] = "invalid_auth"
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("Unexpected exception")
+            except CannotConnect:
+                errors["base"] = "cannot_connect"
+            except Exception:
+                _LOGGER.exception("Unexpected exception during provisioning")
                 errors["base"] = "unknown"
             else:
-                self._data = user_input
-                return await self.async_step_certificates()
+                # Success - create entry
+                return self.async_create_entry(
+                    title=f"BTicino ({self._data[CONF_SIP_DOMAIN]})",
+                    data=self._data,
+                )
 
         return self.async_show_form(
             step_id="user",
             data_schema=STEP_USER_DATA_SCHEMA,
             errors=errors,
-            description_placeholders={
-                "example_username": "user@email.com-MACADDRESS@123456.bs.iotleg.com",
-                "example_domain": "123456.bs.iotleg.com",
-                "example_gateway": "SERIALNUMBER.bs.iotleg.com",
-            },
         )
 
-    async def async_step_certificates(
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> config_entries.OptionsFlow:
+        """Create the options flow."""
+        return OptionsFlowHandler(config_entry)
+
+
+class OptionsFlowHandler(config_entries.OptionsFlow):
+    """Handle options flow for BTicino Hometouch."""
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        """Initialize options flow."""
+        self.config_entry = config_entry
+
+    async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle the certificates step."""
-        errors: dict[str, str] = {}
-
+        """Manage the options."""
         if user_input is not None:
-            # Validate certificates
-            try:
-                if "-----BEGIN CERTIFICATE-----" not in user_input[CONF_CLIENT_CERT]:
-                    raise InvalidCert("Invalid client certificate format")
+            # Update config entry data
+            new_data = {**self.config_entry.data}
+            new_data[CONF_NUM_CAMERAS] = user_input[CONF_NUM_CAMERAS]
+            new_data[CONF_NUM_LOCKS] = user_input[CONF_NUM_LOCKS]
 
-                if "-----BEGIN" not in user_input[CONF_CLIENT_KEY]:
-                    raise InvalidCert("Invalid private key format")
-
-                if "-----BEGIN CERTIFICATE-----" not in user_input[CONF_CA_CERT]:
-                    raise InvalidCert("Invalid CA certificate format")
-
-            except InvalidCert as e:
-                errors["base"] = "invalid_cert"
-            except Exception:
-                _LOGGER.exception("Unexpected exception")
-                errors["base"] = "unknown"
-            else:
-                # Merge data and create entry
-                self._data.update(user_input)
-
-                # Default lock commands (all type A)
-                self._data[CONF_LOCK_COMMANDS] = ["A"] * self._data[CONF_NUM_LOCKS]
-
-                return self.async_create_entry(
-                    title=f"BTicino Hometouch ({self._data[CONF_SIP_DOMAIN]})",
-                    data=self._data,
+            # Adjust lock commands array size
+            current_commands = new_data.get(CONF_LOCK_COMMANDS, [])
+            new_num_locks = user_input[CONF_NUM_LOCKS]
+            if len(current_commands) < new_num_locks:
+                # Extend with type A
+                current_commands.extend(
+                    ["A"] * (new_num_locks - len(current_commands))
                 )
+            elif len(current_commands) > new_num_locks:
+                # Truncate
+                current_commands = current_commands[:new_num_locks]
+            new_data[CONF_LOCK_COMMANDS] = current_commands
 
+            # Update gateway address if provided
+            if user_input.get(CONF_GATEWAY_ADDRESS):
+                new_data[CONF_GATEWAY_ADDRESS] = user_input[CONF_GATEWAY_ADDRESS]
+
+            self.hass.config_entries.async_update_entry(
+                self.config_entry, data=new_data
+            )
+            return self.async_create_entry(title="", data={})
+
+        # Show current settings
         return self.async_show_form(
-            step_id="certificates",
-            data_schema=STEP_CERTS_DATA_SCHEMA,
-            errors=errors,
-            description_placeholders={
-                "cert_info": "Paste the contents of your decrypted certificate files",
-            },
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_NUM_CAMERAS,
+                        default=self.config_entry.data.get(
+                            CONF_NUM_CAMERAS, DEFAULT_NUM_CAMERAS
+                        ),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=1, max=10)),
+                    vol.Required(
+                        CONF_NUM_LOCKS,
+                        default=self.config_entry.data.get(
+                            CONF_NUM_LOCKS, DEFAULT_NUM_LOCKS
+                        ),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=1, max=10)),
+                    vol.Optional(
+                        CONF_GATEWAY_ADDRESS,
+                        default=self.config_entry.data.get(CONF_GATEWAY_ADDRESS, ""),
+                    ): str,
+                }
+            ),
         )
 
 
@@ -158,5 +242,5 @@ class InvalidAuth(HomeAssistantError):
     """Error to indicate invalid authentication."""
 
 
-class InvalidCert(HomeAssistantError):
-    """Error to indicate invalid certificate."""
+class CannotConnect(HomeAssistantError):
+    """Error to indicate connection/provisioning failed."""
