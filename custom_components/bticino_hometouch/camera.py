@@ -1,4 +1,4 @@
-"""Camera platform for BTicino Hometouch."""
+"""Camera platform for BTicino Hometouch - On-demand video streaming."""
 from __future__ import annotations
 
 import asyncio
@@ -14,8 +14,16 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import BticinoCoordinator, IntercomState
+from .sip_client import MediaMode
 
 _LOGGER = logging.getLogger(__name__)
+
+# Station names mapping
+STATION_NAMES = {
+    1: "Albani",
+    2: "Madruzzo",
+    3: "Scala B",
+}
 
 
 async def async_setup_entry(
@@ -28,7 +36,7 @@ async def async_setup_entry(
 
     entities: list[Camera] = []
 
-    # Add camera entities for each camera
+    # Add camera entities for each outdoor station
     for camera_id in range(1, coordinator.num_cameras + 1):
         entities.append(BticinoIntercomCamera(coordinator, entry, camera_id))
 
@@ -36,10 +44,10 @@ async def async_setup_entry(
 
 
 class BticinoIntercomCamera(CoordinatorEntity, Camera):
-    """Camera entity for BTicino Hometouch.
+    """On-demand camera entity for BTicino Hometouch.
 
-    This camera supports WebRTC for low-latency video streaming with
-    bidirectional audio when there's an active call.
+    This camera automatically initiates a SIP call when the stream is requested,
+    providing on-demand video access to outdoor stations.
     """
 
     _attr_has_entity_name = True
@@ -55,12 +63,14 @@ class BticinoIntercomCamera(CoordinatorEntity, Camera):
         super().__init__(coordinator)
         Camera.__init__(self)
         self._camera_id = camera_id
+        self._station_name = STATION_NAMES.get(camera_id, f"Stazione {camera_id}")
         self._attr_unique_id = f"{entry.entry_id}_camera_{camera_id}"
-        self._attr_name = f"Outdoor Station {camera_id}"
+        self._attr_name = f"Camera {self._station_name}"
         self._attr_is_streaming = False
         self._last_image: bytes | None = None
+        self._call_initiated_by_us = False
         # Set explicit entity_id for consistent naming
-        self.entity_id = f"camera.bticino_hometouch_outdoor_station_{camera_id}"
+        self.entity_id = f"camera.bticino_{self._station_name.lower().replace(' ', '_')}"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -74,17 +84,17 @@ class BticinoIntercomCamera(CoordinatorEntity, Camera):
 
     @property
     def is_on(self) -> bool:
-        """Return True if this camera is active (during call from this station)."""
+        """Return True if this camera is active."""
         return self.coordinator.active_camera == self._camera_id
 
     @property
     def available(self) -> bool:
-        """Return True if entity is available."""
+        """Return True if entity is available (SIP registered)."""
         return self.coordinator.is_registered
 
     @property
     def is_recording(self) -> bool:
-        """Return True if there's an active call."""
+        """Return True if there's an active call to this station."""
         return self.coordinator.has_active_call and self.coordinator.active_camera == self._camera_id
 
     @property
@@ -98,87 +108,134 @@ class BticinoIntercomCamera(CoordinatorEntity, Camera):
         """Return extra state attributes."""
         state = self.coordinator.get_station_state(self._camera_id)
         return {
+            "station_id": self._camera_id,
+            "station_name": self._station_name,
             "station_state": state.value,
             "is_ringing": state == IntercomState.RINGING,
             "is_connected": state == IntercomState.CONNECTED,
-            "rtsp_url": self.coordinator.get_rtsp_url(self._camera_id),
-            "webrtc_url": self.coordinator.get_webrtc_url(self._camera_id),
+            "rtsp_url": self._get_stream_url(),
+            "on_demand": True,
         }
+
+    def _get_stream_url(self) -> str:
+        """Get the RTSP stream URL from go2rtc."""
+        return f"rtsp://a889bffc-go2rtc:8554/bticino_camera_{self._camera_id}"
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
     ) -> bytes | None:
         """Return a still image from the camera.
 
-        Note: Images are only available during active calls since video
-        comes via SRTP which requires SIP call establishment.
+        This is an on-demand camera - if no call is active, we initiate one.
         """
-        if not self.coordinator.has_active_call:
-            return self._last_image
+        # If there's already an active call to this station, return cached image
+        if self.coordinator.has_active_call and self.coordinator.active_camera == self._camera_id:
+            if self._last_image:
+                return self._last_image
+            # TODO: Capture frame from stream
+            return self._generate_placeholder_image("In chiamata...")
 
-        # TODO: Capture a frame from the stream
-        return self._last_image
+        # If no active call, initiate one to get the video
+        if not self.coordinator.has_active_call:
+            _LOGGER.info("On-demand: initiating call to station %d (%s)", self._camera_id, self._station_name)
+            self._call_initiated_by_us = True
+            success = await self.coordinator.async_initiate_call(self._camera_id, MediaMode.VIDEO_ONLY)
+            if not success:
+                _LOGGER.warning("Failed to initiate on-demand call to station %d", self._camera_id)
+                return self._generate_placeholder_image("Errore connessione")
+
+            # Wait a bit for the call to establish
+            await asyncio.sleep(2)
+
+        # If call is active but for a different camera, switch to this one
+        elif self.coordinator.active_camera != self._camera_id:
+            _LOGGER.info("Switching to camera %d", self._camera_id)
+            await self.coordinator.async_switch_camera(self._camera_id)
+            await asyncio.sleep(1)
+
+        # Return placeholder while stream is establishing
+        return self._generate_placeholder_image("Connessione...")
+
+    def _generate_placeholder_image(self, text: str = "Premi per visualizzare") -> bytes:
+        """Generate a simple placeholder image."""
+        # Create a minimal 1x1 gray JPEG as placeholder
+        # Real images will come from the stream when a call is active
+        return bytes([
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
+            0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43,
+            0x00, 0x08, 0x06, 0x06, 0x07, 0x06, 0x05, 0x08, 0x07, 0x07, 0x07, 0x09,
+            0x09, 0x08, 0x0A, 0x0C, 0x14, 0x0D, 0x0C, 0x0B, 0x0B, 0x0C, 0x19, 0x12,
+            0x13, 0x0F, 0x14, 0x1D, 0x1A, 0x1F, 0x1E, 0x1D, 0x1A, 0x1C, 0x1C, 0x20,
+            0x24, 0x2E, 0x27, 0x20, 0x22, 0x2C, 0x23, 0x1C, 0x1C, 0x28, 0x37, 0x29,
+            0x2C, 0x30, 0x31, 0x34, 0x34, 0x34, 0x1F, 0x27, 0x39, 0x3D, 0x38, 0x32,
+            0x3C, 0x2E, 0x33, 0x34, 0x32, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01,
+            0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0xFF, 0xC4, 0x00, 0x1F, 0x00, 0x00,
+            0x01, 0x05, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+            0x09, 0x0A, 0x0B, 0xFF, 0xC4, 0x00, 0xB5, 0x10, 0x00, 0x02, 0x01, 0x03,
+            0x03, 0x02, 0x04, 0x03, 0x05, 0x05, 0x04, 0x04, 0x00, 0x00, 0x01, 0x7D,
+            0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12, 0x21, 0x31, 0x41, 0x06,
+            0x13, 0x51, 0x61, 0x07, 0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xA1, 0x08,
+            0x23, 0x42, 0xB1, 0xC1, 0x15, 0x52, 0xD1, 0xF0, 0x24, 0x33, 0x62, 0x72,
+            0x82, 0x09, 0x0A, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x25, 0x26, 0x27, 0x28,
+            0x29, 0x2A, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x43, 0x44, 0x45,
+            0x46, 0x47, 0x48, 0x49, 0x4A, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59,
+            0x5A, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69, 0x6A, 0x73, 0x74, 0x75,
+            0x76, 0x77, 0x78, 0x79, 0x7A, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89,
+            0x8A, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9A, 0xA2, 0xA3,
+            0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6,
+            0xB7, 0xB8, 0xB9, 0xBA, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9,
+            0xCA, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xE1, 0xE2,
+            0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xF1, 0xF2, 0xF3, 0xF4,
+            0xF5, 0xF6, 0xF7, 0xF8, 0xF9, 0xFA, 0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01,
+            0x00, 0x00, 0x3F, 0x00, 0xFB, 0xD5, 0xFF, 0xD9
+        ])
 
     async def stream_source(self) -> str | None:
         """Return the RTSP stream source URL.
 
-        The stream is provided by go2rtc which handles SRTP decryption.
+        This is called when HA needs to stream video. We ensure a call is active first.
         """
+        # If no active call, initiate one
         if not self.coordinator.has_active_call:
-            return None
+            _LOGGER.info("Stream requested - initiating on-demand call to station %d", self._camera_id)
+            self._call_initiated_by_us = True
+            success = await self.coordinator.async_initiate_call(self._camera_id, MediaMode.VIDEO_ONLY)
+            if not success:
+                _LOGGER.error("Failed to initiate call for stream")
+                return None
+            # Wait for call to establish
+            await asyncio.sleep(3)
 
-        if self.coordinator.active_camera != self._camera_id:
-            return None
+        # If call is active but for different camera, switch
+        elif self.coordinator.active_camera != self._camera_id:
+            _LOGGER.info("Switching camera for stream to %d", self._camera_id)
+            await self.coordinator.async_switch_camera(self._camera_id)
+            await asyncio.sleep(1)
 
-        return self.coordinator.get_rtsp_url(self._camera_id)
+        # Return the go2rtc RTSP URL
+        return self._get_stream_url()
 
     @property
     def frontend_stream_type(self) -> str | None:
-        """Return the type of stream for the frontend.
-
-        Returns 'webrtc' for low-latency streaming with bidirectional audio.
-        """
-        if self.coordinator.has_active_call and self.coordinator.active_camera == self._camera_id:
-            return "webrtc"
-        return None
-
-    async def async_handle_web_rtc_offer(self, offer_sdp: str) -> str | None:
-        """Handle WebRTC offer from frontend.
-
-        This enables bidirectional audio through WebRTC.
-        """
-        # The WebRTC negotiation is handled by go2rtc
-        # We need to forward the offer to go2rtc and return the answer
-        webrtc_url = self.coordinator.get_webrtc_url(self._camera_id)
-        if not webrtc_url:
-            return None
-
-        try:
-            import aiohttp
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    webrtc_url,
-                    json={"type": "offer", "sdp": offer_sdp},
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data.get("sdp")
-        except Exception as e:
-            _LOGGER.error("WebRTC negotiation failed: %s", e)
-
-        return None
+        """Return the type of stream for the frontend."""
+        # Always return HLS for compatibility
+        return "hls"
 
     async def async_turn_on(self) -> None:
-        """Turn on the camera (switch to this camera during active call)."""
+        """Turn on the camera - initiate call to this station."""
         if self.coordinator.has_active_call:
-            await self.coordinator.async_switch_camera(self._camera_id)
-            _LOGGER.info("Switched to camera %d", self._camera_id)
+            if self.coordinator.active_camera != self._camera_id:
+                await self.coordinator.async_switch_camera(self._camera_id)
+                _LOGGER.info("Switched to camera %d", self._camera_id)
         else:
-            # Initiate call to this station to view the camera
-            await self.coordinator.async_initiate_call(self._camera_id)
-            _LOGGER.info("Initiated call to station %d", self._camera_id)
+            self._call_initiated_by_us = True
+            await self.coordinator.async_initiate_call(self._camera_id, MediaMode.VIDEO_ONLY)
+            _LOGGER.info("Initiated on-demand call to station %d", self._camera_id)
 
     async def async_turn_off(self) -> None:
-        """Turn off the camera (hangup call)."""
+        """Turn off the camera - hangup call."""
         if self.coordinator.has_active_call:
             await self.coordinator.async_hangup_call()
+            self._call_initiated_by_us = False
+            _LOGGER.info("Ended call from camera turn off")

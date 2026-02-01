@@ -7,41 +7,101 @@ views:
     icon: mdi:doorbell-video
     badges: []
     cards:
-      # Main intercom panel - adapts to number of outdoor stations
+      # Main intercom panel with custom card
       - type: vertical-stack
         cards:
-          # Header
-          - type: markdown
-            content: |
-              # 🏠 Videocitofono BTicino
-
-          # Single outdoor station layout
+          # Custom card with all 3 stations
           - type: custom:bticino-hometouch-card
-            camera_entity: camera.bticino_hometouch_outdoor_station_1
-            lock_entity: button.bticino_hometouch_unlock_door_1
+            title: Videocitofono
+            stations:
+              - id: 1
+                name: Albani
+                button: button.bticino_hometouch_view_video_1
+                lock: button.bticino_hometouch_unlock_door_1
+                camera: camera.bticino_hometouch_outdoor_station_1
+              - id: 2
+                name: Madruzzo
+                button: button.bticino_hometouch_view_video_2
+                lock: button.bticino_hometouch_unlock_door_2
+                camera: camera.bticino_hometouch_outdoor_station_2
+              - id: 3
+                name: Scala B
+                button: button.bticino_hometouch_view_video_3
+                lock: button.bticino_hometouch_unlock_door_3
+                camera: camera.bticino_hometouch_outdoor_station_3
+            go2rtc_url: http://a889bffc-go2rtc:1984
+            hangup_button: button.bticino_hometouch_hangup_call
+            audio_button: button.bticino_hometouch_enable_audio
 
           # Connection status
           - type: entities
+            title: Stato Sistema
             entities:
               - entity: binary_sensor.bticino_hometouch_connection
-                name: Stato Connessione
+                name: Connessione SIP
                 icon: mdi:lan-connect
               - entity: binary_sensor.bticino_hometouch_doorbell
                 name: Campanello
                 icon: mdi:doorbell
 
-      # Alternative: Multiple outdoor stations (uncomment if needed)
-      # - type: horizontal-stack
-      #   cards:
-      #     - type: custom:bticino-hometouch-card
-      #       camera_entity: camera.bticino_hometouch_outdoor_station_1
-      #       lock_entity: button.bticino_hometouch_unlock_door_1
-      #
-      #     - type: custom:bticino-hometouch-card
-      #       camera_entity: camera.bticino_hometouch_outdoor_station_2
-      #       lock_entity: button.bticino_hometouch_unlock_door_2
+      # Camera entities for other integrations (Jarvis, automations, etc.)
+      - type: vertical-stack
+        title: Telecamere (On-Demand)
+        cards:
+          - type: horizontal-stack
+            cards:
+              - type: picture-entity
+                entity: camera.bticino_hometouch_outdoor_station_1
+                name: Albani
+                show_state: false
+                camera_view: auto
 
-      # Conditional card for incoming call
+              - type: picture-entity
+                entity: camera.bticino_hometouch_outdoor_station_2
+                name: Madruzzo
+                show_state: false
+                camera_view: auto
+
+              - type: picture-entity
+                entity: camera.bticino_hometouch_outdoor_station_3
+                name: Scala B
+                show_state: false
+                camera_view: auto
+
+      # Quick action buttons
+      - type: horizontal-stack
+        cards:
+          - type: button
+            entity: button.bticino_hometouch_unlock_door_1
+            name: Apri Albani
+            icon: mdi:door-open
+            tap_action:
+              action: call-service
+              service: button.press
+              target:
+                entity_id: button.bticino_hometouch_unlock_door_1
+
+          - type: button
+            entity: button.bticino_hometouch_unlock_door_2
+            name: Apri Madruzzo
+            icon: mdi:door-open
+            tap_action:
+              action: call-service
+              service: button.press
+              target:
+                entity_id: button.bticino_hometouch_unlock_door_2
+
+          - type: button
+            entity: button.bticino_hometouch_unlock_door_3
+            name: Apri Scala B
+            icon: mdi:door-open
+            tap_action:
+              action: call-service
+              service: button.press
+              target:
+                entity_id: button.bticino_hometouch_unlock_door_3
+
+      # Call control (shown when call is active)
       - type: conditional
         conditions:
           - entity: binary_sensor.bticino_hometouch_doorbell
@@ -53,25 +113,24 @@ views:
               content: |
                 ## 🔔 Chiamata in arrivo!
 
-            - type: picture-entity
-              entity: camera.bticino_hometouch_outdoor_station_1
-              camera_view: live
-              show_state: false
-              show_name: false
-
             - type: horizontal-stack
               cards:
                 - type: button
-                  entity: button.bticino_hometouch_answer_call
-                  name: Rispondi
-                  icon: mdi:phone
-
-                - type: button
-                  entity: button.bticino_hometouch_unlock_door_1
-                  name: Apri
-                  icon: mdi:door-open
+                  entity: button.bticino_hometouch_enable_audio
+                  name: Audio
+                  icon: mdi:microphone
+                  tap_action:
+                    action: call-service
+                    service: button.press
+                    target:
+                      entity_id: button.bticino_hometouch_enable_audio
 
                 - type: button
                   entity: button.bticino_hometouch_hangup_call
-                  name: Rifiuta
+                  name: Chiudi
                   icon: mdi:phone-hangup
+                  tap_action:
+                    action: call-service
+                    service: button.press
+                    target:
+                      entity_id: button.bticino_hometouch_hangup_call

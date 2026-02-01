@@ -26,6 +26,7 @@ class CallState(Enum):
     CONNECTED = "connected"
     HOLD = "hold"
     DISCONNECTED = "disconnected"
+    NEEDS_AUTH = "needs_auth"  # Needs reconnection for authenticated INVITE
 
 
 class RegistrationState(Enum):
@@ -53,6 +54,13 @@ class SIPConfig:
     apartment_code: str = ""  # OpenWebNet apartment/unit address
 
 
+class MediaMode(Enum):
+    """Media mode for SIP calls."""
+    VIDEO_ONLY = "video_only"      # Only receive video (no audio)
+    AUDIO_ONLY = "audio_only"      # Only bidirectional audio (no video)
+    AUDIO_VIDEO = "audio_video"    # Both audio and video (default)
+
+
 @dataclass
 class SIPCall:
     """Represents a SIP call."""
@@ -70,7 +78,10 @@ class SIPCall:
     srtp_key: bytes = b""
     video_rtp_port: int = 0
     video_srtp_key: bytes = b""
+    audio_rtp_port: int = 0
+    audio_srtp_key: bytes = b""
     devaddr: str = ""
+    media_mode: MediaMode = MediaMode.VIDEO_ONLY  # Default to video-only for camera viewing
 
 
 class SIPClient:
@@ -448,8 +459,13 @@ class SIPClient:
         _LOGGER.error("MESSAGE failed after %d attempts", max_attempts)
         return False
 
-    def _build_proxy_auth_header(self, to_uri: str) -> str:
-        """Build Proxy-Authorization header for MESSAGE requests."""
+    def _build_proxy_auth_header(self, to_uri: str, method: str = "MESSAGE") -> str:
+        """Build Proxy-Authorization header for SIP requests.
+
+        Args:
+            to_uri: The request URI
+            method: SIP method (MESSAGE, INVITE, etc.)
+        """
         realm = self._proxy_realm or self._config.domain
         nonce = self._proxy_nonce
         opaque = self._proxy_opaque
@@ -469,11 +485,11 @@ class SIPClient:
         username = self._config.username
         password = self._config.password
 
-        _LOGGER.debug("Building Proxy-Auth: user=%s, realm=%s, uri=%s, nc=%s", username, realm, to_uri, nc)
+        _LOGGER.debug("Building Proxy-Auth: user=%s, realm=%s, uri=%s, method=%s, nc=%s", username, realm, to_uri, method, nc)
 
         # Calculate digest with qop=auth
         ha1 = hashlib.md5(f"{username}:{realm}:{password}".encode()).hexdigest()
-        ha2 = hashlib.md5(f"MESSAGE:{to_uri}".encode()).hexdigest()
+        ha2 = hashlib.md5(f"{method}:{to_uri}".encode()).hexdigest()
         # With qop=auth: response = MD5(HA1:nonce:nc:cnonce:qop:HA2)
         response_hash = hashlib.md5(f"{ha1}:{nonce}:{nc}:{cnonce}:auth:{ha2}".encode()).hexdigest()
 
@@ -506,21 +522,6 @@ class SIPClient:
         await self._send(response)
 
         call.state = CallState.CONNECTED
-        if self._on_call_state_changed:
-            self._on_call_state_changed(call, call.state)
-
-        return True
-
-    async def hangup_call(self, call_id: str) -> bool:
-        """Hangup a call."""
-        call = self._calls.get(call_id)
-        if not call:
-            return False
-
-        request = self._build_bye_request(call)
-        await self._send(request)
-
-        call.state = CallState.DISCONNECTED
         if self._on_call_state_changed:
             self._on_call_state_changed(call, call.state)
 
@@ -579,7 +580,8 @@ class SIPClient:
 
         if devaddr:
             lines.append(f"a=DEVADDR:{devaddr}")
-            lines.append("a=CAMERASLIDING:1")
+            # CAMERASLIDING is only used for call updates (cycling cameras), not initial INVITEs
+            # Including it in initial INVITE causes 486 Busy Here from gateway
 
         return "\r\n".join(lines)
 
@@ -594,26 +596,6 @@ class SIPClient:
             f"Call-ID: {call.call_id}",
             f"CSeq: {call.cseq} INVITE",
             f"Contact: <sip:{self._config.username}@{self._config.local_ip}:{self._config.local_port};transport=tls>",
-            "Content-Length: 0",
-            "",
-            "",
-        ]
-
-        return "\r\n".join(lines)
-
-    def _build_bye_request(self, call: SIPCall) -> str:
-        """Build BYE request."""
-        branch = self._generate_branch()
-        call.cseq += 1
-
-        lines = [
-            f"BYE {call.remote_uri} SIP/2.0",
-            f"Via: SIP/2.0/TLS {self._config.local_ip}:{self._config.local_port};branch={branch}",
-            f"From: {call.from_header}",
-            f"To: {call.to_header}",
-            f"Call-ID: {call.call_id}",
-            f"CSeq: {call.cseq} BYE",
-            "Max-Forwards: 70",
             "Content-Length: 0",
             "",
             "",
@@ -721,7 +703,9 @@ class SIPClient:
             await self._handle_register_response(status_code, message)
         elif cseq_method == "MESSAGE":
             await self._handle_message_response(status_code, message)
-        elif cseq_method in ("INVITE", "UPDATE", "BYE"):
+        elif cseq_method == "INVITE":
+            await self._handle_invite_response(status_code, message)
+        elif cseq_method in ("UPDATE", "BYE"):
             await self._handle_call_response(status_code, message, cseq_method)
 
     async def _handle_register_response(self, status_code: int, message: str):
@@ -1011,6 +995,442 @@ class SIPClient:
                     await self._send(request)
                 except Exception as e:
                     _LOGGER.error("Re-registration failed: %s", e)
+
+    async def initiate_call(
+        self,
+        station_id: int = 1,
+        media_mode: MediaMode = MediaMode.VIDEO_ONLY
+    ) -> SIPCall | None:
+        """Initiate an outgoing call to view camera from an outdoor station.
+
+        This sends a SIP INVITE to the MHT (MyHomeTouch) gateway to request
+        video streaming from the specified outdoor station (posto esterno).
+
+        Args:
+            station_id: The outdoor station number (1, 2, 3...)
+            media_mode: What media to request (VIDEO_ONLY, AUDIO_ONLY, or AUDIO_VIDEO)
+
+        Returns:
+            SIPCall object if successful, None if failed
+        """
+        if not self.is_registered:
+            _LOGGER.error("Cannot initiate call: not registered")
+            return None
+
+        # Build the SIP URI for MHT (MyHomeTouch gateway)
+        to_uri = f"{SIP_MHT_PREFIX}{self._config.domain}"
+
+        # Build DEVADDR for the station
+        # Format: deviceDev + deviceAddr (NO PADDING!)
+        # Based on decompiled app code (Z0/s.java lines 611-617):
+        #   StringBuilder.append(device.f())  // deviceDev (e.g. "2" for VDE)
+        #   StringBuilder.append(device.e())  // deviceAddr (e.g. "0", "1", "6")
+        #   Result: "20", "21", "26"
+        #
+        # From plantSQLite database - VDE devices have deviceDev=2:
+        #   - Albani (station 1) = deviceDev "2" + deviceAddr "0" → DEVADDR "20"
+        #   - Madruzzo (station 2) = deviceDev "2" + deviceAddr "1" → DEVADDR "21"
+        #   - Scala B (station 3) = deviceDev "2" + deviceAddr "6" → DEVADDR "26"
+        STATION_TO_DEVADDR = {
+            1: "20",   # Albani - deviceDev "2" + deviceAddr "0"
+            2: "21",   # Madruzzo - deviceDev "2" + deviceAddr "1"
+            3: "26",   # Scala B - deviceDev "2" + deviceAddr "6"
+        }
+
+        devaddr = STATION_TO_DEVADDR.get(station_id, f"2{station_id - 1}")
+
+        _LOGGER.info("Initiating call to station %d (DEVADDR=%s, mode=%s)", station_id, devaddr, media_mode.value)
+
+        # Create call object
+        call_id = self._generate_call_id()
+        call = SIPCall(
+            call_id=call_id,
+            state=CallState.CALLING,
+            remote_uri=to_uri,
+            local_tag=self._generate_tag(),
+            cseq=1,
+            devaddr=devaddr,
+            media_mode=media_mode,
+        )
+
+        self._calls[call_id] = call
+
+        try:
+            # Build and send INVITE with custom SDP attributes
+            invite = self._build_invite_request(call)
+            await self._send(invite)
+
+            # Wait for response (with timeout)
+            # The response will be handled in _handle_invite_response
+            for _ in range(100):  # 10 second timeout
+                await asyncio.sleep(0.1)
+
+                if call.state == CallState.CONNECTED:
+                    _LOGGER.info("Call connected to station %d", station_id)
+                    return call
+                elif call.state == CallState.DISCONNECTED:
+                    _LOGGER.warning("Call to station %d failed", station_id)
+                    return None
+                elif call.state == CallState.NEEDS_AUTH:
+                    # Need to reconnect for authenticated INVITE
+                    # This is done here to avoid race conditions with receive loop
+                    _LOGGER.info("Reconnecting for authenticated INVITE...")
+
+                    # Disconnect completely
+                    await self.disconnect()
+                    await asyncio.sleep(0.3)
+
+                    # Reconnect
+                    if not await self.connect():
+                        _LOGGER.error("Failed to reconnect for authenticated INVITE")
+                        call.state = CallState.DISCONNECTED
+                        return None
+
+                    # Send authenticated INVITE
+                    call.state = CallState.CALLING
+                    call.cseq += 1
+                    auth_header = self._build_proxy_auth_header(call.remote_uri, method="INVITE")
+                    invite = self._build_invite_request_with_auth(call, auth_header)
+                    await self._send(invite)
+                    _LOGGER.info("Sent authenticated INVITE")
+
+            _LOGGER.warning("Call to station %d timed out", station_id)
+            call.state = CallState.DISCONNECTED
+            return None
+
+        except Exception as e:
+            _LOGGER.error("Failed to initiate call: %s", e)
+            call.state = CallState.DISCONNECTED
+            return None
+
+    def _build_invite_request(self, call: SIPCall) -> str:
+        """Build an INVITE request based on media mode."""
+        branch = self._generate_branch()
+        call.branch = branch
+
+        from_uri = f"sip:{self._config.username}@{self._config.domain}"
+        to_uri = call.remote_uri
+        contact = f"<sip:{self._config.username}@{self._config.local_ip}:{self._config.local_port};transport=tls>"
+
+        # Build SDP body based on media mode
+        sdp_body = self._build_sdp_for_mode(call)
+
+        _LOGGER.info("INVITE SDP [%s] (%d bytes): %s", call.media_mode.value, len(sdp_body), sdp_body.replace('\r\n', ' | '))
+
+        lines = [
+            f"INVITE {to_uri} SIP/2.0",
+            f"Via: SIP/2.0/TLS {self._config.local_ip}:{self._config.local_port};branch={branch}",
+            f"Route: <sip:{self._config.server}:{self._config.port};transport=tls;lr>",
+            f"From: <{from_uri}>;tag={call.local_tag}",
+            f"To: <{to_uri}>",
+            f"Call-ID: {call.call_id}",
+            f"CSeq: {call.cseq} INVITE",
+            f"Contact: {contact}",
+            "Max-Forwards: 70",
+            "User-Agent: HomeAssistant-BTicino/1.0",
+            "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, MESSAGE, NOTIFY",
+            "Supported: replaces, outbound, 100rel",  # Match gateway capabilities
+            "Content-Type: application/sdp",
+            "Content-Disposition: session",  # Required by BTicino (from thesis)
+            f"Content-Length: {len(sdp_body)}",
+            "",
+            sdp_body,
+        ]
+
+        return "\r\n".join(lines)
+
+    def _build_sdp_for_mode(self, call: SIPCall) -> str:
+        """Build SDP body based on media mode.
+
+        VIDEO_ONLY: Only video stream (recvonly) - for camera viewing
+        AUDIO_ONLY: Only audio stream (sendrecv) - for intercom conversation
+        AUDIO_VIDEO: Both audio (sendrecv) and video (recvonly)
+        """
+        import base64
+
+        session_id = int(time.time())
+
+        sdp_lines = [
+            "v=0",
+            f"o={self._config.username} {session_id} {session_id} IN IP4 {self._config.local_ip}",
+            "s=BTicino Call",
+            f"c=IN IP4 {self._config.local_ip}",
+            "t=0 0",
+            # Custom BTicino session-level attributes (MUST be before media lines)
+            # For VDE (Video Door Entry), don't set TVCC - only TVCC cameras use TVCC:1
+            # The official app omits TVCC entirely for normal door stations
+            f"a=DEVADDR:{call.devaddr}",
+            # CAMERASLIDING is only used for call updates (cycling cameras), not initial INVITEs
+            # Including it in initial INVITE causes 486 Busy Here from gateway
+        ]
+
+        # Add audio if needed
+        if call.media_mode in (MediaMode.AUDIO_ONLY, MediaMode.AUDIO_VIDEO):
+            local_audio_port = random.randint(30000, 40000)
+            call.audio_rtp_port = local_audio_port
+            audio_key = base64.b64encode(random.randbytes(30)).decode()
+
+            sdp_lines.extend([
+                # Audio media line with SRTP - sendrecv for bidirectional audio
+                f"m=audio {local_audio_port} RTP/SAVP 0 8 101",
+                f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{audio_key}",
+                "a=sendrecv",
+                "a=rtpmap:0 PCMU/8000",
+                "a=rtpmap:8 PCMA/8000",
+                "a=rtpmap:101 telephone-event/8000",
+            ])
+
+        # Add video if needed
+        if call.media_mode in (MediaMode.VIDEO_ONLY, MediaMode.AUDIO_VIDEO):
+            local_video_port = random.randint(20000, 30000)
+            call.video_rtp_port = local_video_port
+            video_key = base64.b64encode(random.randbytes(30)).decode()
+
+            sdp_lines.extend([
+                # Video media line with SRTP - recvonly to receive video from outdoor station
+                f"m=video {local_video_port} RTP/SAVP 96",
+                f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{video_key}",
+                "a=recvonly",
+                "a=rtpmap:96 H264/90000",
+                "a=fmtp:96 profile-level-id=42e01f",
+            ])
+
+        return "\r\n".join(sdp_lines) + "\r\n"
+
+    async def _handle_invite_response(self, status_code: int, message: str):
+        """Handle response to our outgoing INVITE."""
+        # Find Call-ID
+        call_id = ""
+        to_tag = ""
+
+        for line in message.split("\r\n"):
+            lower = line.lower()
+            if lower.startswith("call-id:"):
+                call_id = line[8:].strip()
+            elif lower.startswith("to:"):
+                # Extract tag from To header
+                tag_match = re.search(r'tag=([^;\s>]+)', line)
+                if tag_match:
+                    to_tag = tag_match.group(1)
+
+        call = self._calls.get(call_id)
+        if not call:
+            _LOGGER.debug("Received INVITE response for unknown call %s", call_id)
+            return
+
+        _LOGGER.debug("INVITE response %d for call %s", status_code, call_id)
+
+        if status_code == 100:
+            # Trying - just wait
+            pass
+        elif status_code == 180 or status_code == 183:
+            # Ringing / Session Progress
+            call.state = CallState.EARLY
+            call.remote_tag = to_tag
+        elif status_code == 200:
+            # OK - call established
+            call.state = CallState.CONNECTED
+            call.remote_tag = to_tag
+
+            # Parse SDP from response to get SRTP parameters
+            self._parse_sdp_response(call, message)
+
+            # Send ACK
+            ack = self._build_ack(call)
+            await self._send(ack)
+
+            if self._on_call_state_changed:
+                self._on_call_state_changed(call, call.state)
+
+        elif status_code == 407:
+            # Proxy Authentication Required for INVITE
+            _LOGGER.info("INVITE requires authentication")
+            # Similar to MESSAGE auth handling
+            proxy_auth = ""
+            for line in message.split("\r\n"):
+                if line.lower().startswith("proxy-authenticate:"):
+                    proxy_auth = line[19:].strip()
+                    break
+
+            if proxy_auth:
+                realm_match = re.search(r'realm="([^"]+)"', proxy_auth)
+                nonce_match = re.search(r'nonce="([^"]+)"', proxy_auth)
+                opaque_match = re.search(r'opaque="([^"]+)"', proxy_auth)
+                algorithm_match = re.search(r'algorithm=([^,\s]+)', proxy_auth)
+
+                if realm_match and nonce_match:
+                    # Store auth parameters for _build_proxy_auth_header
+                    self._proxy_realm = realm_match.group(1)
+                    self._proxy_nonce = nonce_match.group(1)
+                    if opaque_match:
+                        self._proxy_opaque = opaque_match.group(1)
+                    if algorithm_match:
+                        self._proxy_algorithm = algorithm_match.group(1)
+                    # Reset nonce count for new nonce
+                    self._nonce_count = 0
+
+                    _LOGGER.debug("INVITE auth params: realm=%s, nonce=%s...",
+                                  self._proxy_realm, self._proxy_nonce[:16] if self._proxy_nonce else "")
+
+                    # Send ACK to complete the 407 transaction
+                    ack = self._build_ack(call)
+                    await self._send(ack)
+
+                    # Signal that we need to reconnect for authenticated INVITE
+                    # The reconnection will be handled by initiate_call() to avoid
+                    # race conditions with the receive loop
+                    _LOGGER.info("Setting NEEDS_AUTH state for reconnection...")
+                    call.state = CallState.NEEDS_AUTH
+
+        elif status_code >= 400:
+            # Error
+            call.state = CallState.DISCONNECTED
+            _LOGGER.warning("INVITE failed with %d", status_code)
+
+            if self._on_call_state_changed:
+                self._on_call_state_changed(call, call.state)
+
+    def _build_invite_request_with_auth(self, call: SIPCall, auth_header: str) -> str:
+        """Build an INVITE request with authentication."""
+        branch = self._generate_branch()
+        call.branch = branch
+
+        from_uri = f"sip:{self._config.username}@{self._config.domain}"
+        to_uri = call.remote_uri
+        contact = f"<sip:{self._config.username}@{self._config.local_ip}:{self._config.local_port};transport=tls>"
+
+        # Rebuild SDP with same format as initial INVITE (reuse the mode-based builder)
+        sdp_body = self._build_sdp_for_mode(call)
+
+        lines = [
+            f"INVITE {to_uri} SIP/2.0",
+            f"Via: SIP/2.0/TLS {self._config.local_ip}:{self._config.local_port};branch={branch}",
+            f"Route: <sip:{self._config.server}:{self._config.port};transport=tls;lr>",
+            f"From: <{from_uri}>;tag={call.local_tag}",
+            f"To: <{to_uri}>",
+            f"Call-ID: {call.call_id}",
+            f"CSeq: {call.cseq} INVITE",
+            f"Contact: {contact}",
+            "Max-Forwards: 70",
+            "User-Agent: HomeAssistant-BTicino/1.0",
+            "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, MESSAGE, NOTIFY",
+            "Supported: replaces, outbound, 100rel",
+            auth_header,
+            "Content-Type: application/sdp",
+            "Content-Disposition: session",
+            f"Content-Length: {len(sdp_body)}",
+            "",
+            sdp_body,
+        ]
+
+        return "\r\n".join(lines)
+
+    def _build_ack(self, call: SIPCall) -> str:
+        """Build an ACK request."""
+        branch = self._generate_branch()
+
+        from_uri = f"sip:{self._config.username}@{self._config.domain}"
+        to_uri = call.remote_uri
+
+        to_header = f"<{to_uri}>"
+        if call.remote_tag:
+            to_header = f"<{to_uri}>;tag={call.remote_tag}"
+
+        lines = [
+            f"ACK {to_uri} SIP/2.0",
+            f"Via: SIP/2.0/TLS {self._config.local_ip}:{self._config.local_port};branch={branch}",
+            f"From: <{from_uri}>;tag={call.local_tag}",
+            f"To: {to_header}",
+            f"Call-ID: {call.call_id}",
+            f"CSeq: {call.cseq} ACK",
+            "Max-Forwards: 70",
+            "Content-Length: 0",
+            "",
+            "",
+        ]
+
+        return "\r\n".join(lines)
+
+    def _parse_sdp_response(self, call: SIPCall, message: str):
+        """Parse SDP from 200 OK response to extract SRTP parameters."""
+        # Find the SDP body (after blank line)
+        parts = message.split("\r\n\r\n", 1)
+        if len(parts) < 2:
+            return
+
+        sdp = parts[1]
+
+        # Look for video port and crypto line
+        for line in sdp.split("\r\n"):
+            if line.startswith("m=video"):
+                parts = line.split()
+                if len(parts) >= 2:
+                    try:
+                        call.video_rtp_port = int(parts[1])
+                    except ValueError:
+                        pass
+            elif line.startswith("a=crypto:"):
+                # SRTP key exchange
+                # Format: a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:base64key
+                crypto_match = re.search(r'inline:([A-Za-z0-9+/=]+)', line)
+                if crypto_match:
+                    import base64
+                    try:
+                        call.video_srtp_key = base64.b64decode(crypto_match.group(1))
+                        _LOGGER.debug("Extracted SRTP key for video")
+                    except Exception as e:
+                        _LOGGER.warning("Failed to decode SRTP key: %s", e)
+            elif line.startswith("c=IN IP4"):
+                # Connection address (remote IP)
+                parts = line.split()
+                if len(parts) >= 3:
+                    _LOGGER.debug("Remote video address: %s", parts[2])
+
+    async def hangup_call(self, call_id: str) -> bool:
+        """Hangup a call by sending BYE."""
+        call = self._calls.get(call_id)
+        if not call:
+            return False
+
+        try:
+            bye = self._build_bye(call)
+            await self._send(bye)
+            call.state = CallState.DISCONNECTED
+
+            if self._on_call_state_changed:
+                self._on_call_state_changed(call, call.state)
+
+            return True
+        except Exception as e:
+            _LOGGER.error("Failed to hangup call: %s", e)
+            return False
+
+    def _build_bye(self, call: SIPCall) -> str:
+        """Build a BYE request."""
+        branch = self._generate_branch()
+        call.cseq += 1
+
+        from_uri = f"sip:{self._config.username}@{self._config.domain}"
+        to_uri = call.remote_uri
+
+        to_header = f"<{to_uri}>"
+        if call.remote_tag:
+            to_header = f"<{to_uri}>;tag={call.remote_tag}"
+
+        lines = [
+            f"BYE {to_uri} SIP/2.0",
+            f"Via: SIP/2.0/TLS {self._config.local_ip}:{self._config.local_port};branch={branch}",
+            f"From: <{from_uri}>;tag={call.local_tag}",
+            f"To: {to_header}",
+            f"Call-ID: {call.call_id}",
+            f"CSeq: {call.cseq} BYE",
+            "Max-Forwards: 70",
+            "Content-Length: 0",
+            "",
+            "",
+        ]
+
+        return "\r\n".join(lines)
 
     @property
     def is_registered(self) -> bool:

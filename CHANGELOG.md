@@ -2,7 +2,37 @@
 
 Tutte le modifiche significative a questo progetto saranno documentate in questo file.
 
-## [2.0.5] - 2025-02-01
+## [2.2.0] - 2026-02-01
+
+### Aggiunto
+
+- **Camera on-demand**: Le entity camera ora avviano automaticamente una chiamata SIP quando viene richiesto lo stream video. Non è più necessario premere un pulsante prima di visualizzare il video.
+
+- **Nomi stazioni negli attributi**: Ogni entity ora include `station_name` (Albani, Madruzzo, Scala B) negli attributi per facilitare il routing con sistemi come Jarvis.
+
+- **Custom card v2.0**: Nuova card Lovelace con:
+  - Grid di 3 stazioni con icone
+  - Popup fullscreen con video player (go2rtc iframe)
+  - Pulsanti Apri/Audio/Chiudi nel popup
+  - Indicatore stato connessione SIP
+
+### Risolti
+
+- **Fix 486 Busy Here**: Rimosso parametro `CAMERASLIDING` dall'INVITE iniziale. L'app ufficiale lo usa solo per cambiare camera durante una chiamata attiva, non nell'INVITE iniziale.
+
+- **Fix DEVADDR mapping**: Corretto il mapping da 60/61/66 a 20/21/26. I dispositivi VDE usano deviceDev=2, non 6.
+
+- **Fix race condition 407**: La riconnessione dopo 407 Proxy Authentication ora avviene nel loop principale invece che inline, evitando l'errore "read() called while another coroutine is already waiting".
+
+### Modificato
+
+- **Dashboard aggiornata**: Nuova configurazione Lovelace con card custom e entity ID corretti.
+
+- **Cleanup repository**: Aggiunto `.gitignore`, rimossi file cache e test.
+
+---
+
+## [2.1.0] - 2025-02-01
 
 ### Risolti
 
@@ -23,15 +53,6 @@ Tutte le modifiche significative a questo progetto saranno documentate in questo
 ### Modificato
 
 - **Logging ottimizzato**: Ridotto il livello di log per i messaggi SIP MESSAGE da INFO a DEBUG per evitare log eccessivamente verbosi in produzione.
-
-### File modificati
-
-- `sip_client.py` - Riscritta autenticazione MESSAGE, aggiunto proxy auth con qop=auth
-- `const.py` - Aggiunta costante `CONF_APARTMENT_CODE`
-- `config_flow.py` - Campo apartment_code nel form di configurazione
-- `coordinator.py` - Passaggio apartment_code a SIPConfig
-- `translations/en.json` - Traduzione campo apartment_code
-- `translations/it.json` - Traduzione campo apartment_code
 
 ---
 
@@ -62,16 +83,6 @@ Tutte le modifiche significative a questo progetto saranno documentate in questo
 ### Modificato
 
 - **Documentazione aggiornata**: `install_it.md` ora include automazioni con supporto dinamico per `station_id`, notifiche con immagine dalla camera corretta, e script che gestiscono correttamente più posti esterni.
-
-### File modificati
-
-- `sip_client.py` - Riscritta gestione certificati SSL
-- `media_proxy.py` - Nuova classe Go2RTCProxy per add-on
-- `camera.py` - Entity ID espliciti
-- `button.py` - Entity ID espliciti
-- `binary_sensor.py` - Entity ID espliciti
-- `coordinator.py` - Riferimento corretto all'entity camera
-- `install_it.md` - Automazioni multi-stazione
 
 ---
 

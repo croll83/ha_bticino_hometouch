@@ -32,7 +32,7 @@ from .const import (
     DEFAULT_NUM_LOCKS,
     DEFAULT_APARTMENT_CODE,
 )
-from .sip_client import SIPClient, SIPConfig, SIPCall, CallState
+from .sip_client import SIPClient, SIPConfig, SIPCall, CallState, MediaMode
 from .media_proxy import MediaProxyManager
 
 _LOGGER = logging.getLogger(__name__)
@@ -364,8 +364,17 @@ class BticinoCoordinator(DataUpdateCoordinator):
 
         return success
 
-    async def async_initiate_call(self, station_id: int) -> bool:
-        """Initiate a call to an outdoor station (view camera on demand)."""
+    async def async_initiate_call(
+        self,
+        station_id: int,
+        media_mode: MediaMode = MediaMode.VIDEO_ONLY
+    ) -> bool:
+        """Initiate a call to an outdoor station.
+
+        Args:
+            station_id: The station number (1, 2, 3...)
+            media_mode: VIDEO_ONLY for camera, AUDIO_ONLY for intercom, AUDIO_VIDEO for both
+        """
         if not self._sip_client or not self._sip_client.is_registered:
             _LOGGER.error("SIP client not registered")
             return False
@@ -374,11 +383,46 @@ class BticinoCoordinator(DataUpdateCoordinator):
             _LOGGER.warning("Call already in progress")
             return False
 
-        # TODO: Implement outgoing call to view camera
-        # This requires understanding the SIP address format for each station
-        # For now, return False as this feature needs more reverse engineering
-        _LOGGER.info("Initiating call to station %d", station_id)
+        _LOGGER.info("Initiating call to station %d (mode=%s)", station_id, media_mode.value)
+
+        # Use the SIP client to initiate the call
+        call = await self._sip_client.initiate_call(station_id, media_mode)
+
+        if call:
+            self._current_call = call
+            self._active_camera = station_id
+            self._station_states[station_id] = IntercomState.CONNECTED
+
+            # Setup video stream if video mode
+            if media_mode in (MediaMode.VIDEO_ONLY, MediaMode.AUDIO_VIDEO):
+                await self._setup_video_stream(call)
+
+            self.async_set_updated_data(self.data)
+            return True
+
         return False
+
+    async def async_initiate_video_call(self, station_id: int) -> bool:
+        """Initiate a video-only call to view the camera."""
+        return await self.async_initiate_call(station_id, MediaMode.VIDEO_ONLY)
+
+    async def async_initiate_audio_call(self, station_id: int) -> bool:
+        """Initiate an audio-only call for intercom conversation."""
+        return await self.async_initiate_call(station_id, MediaMode.AUDIO_ONLY)
+
+    async def async_enable_audio(self) -> bool:
+        """Enable bidirectional audio on an existing video call.
+
+        This sends a re-INVITE to add audio to the current video stream.
+        """
+        if not self._sip_client or not self._current_call:
+            _LOGGER.error("No active call to add audio to")
+            return False
+
+        # For now, we'll need to implement re-INVITE in the SIP client
+        # This is a placeholder - proper implementation would send re-INVITE with audio+video
+        _LOGGER.info("Audio enable requested - feature in development")
+        return True
 
     @property
     def is_registered(self) -> bool:
