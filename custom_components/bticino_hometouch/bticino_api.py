@@ -335,26 +335,42 @@ class BticinoApi:
 
         _LOGGER.debug("Found gateway: %s", gateway_id)
 
-        # Step 4: Generate device ID and SIP account
-        device_id = secrets.token_hex(6).upper()
-        email_part = self._email.replace("@", "-").replace(".", "-")
-        sip_account = f"{email_part}-{device_id}@{gateway_id}.bs.iotleg.com"
-
-        _LOGGER.debug("Creating SIP account: %s", sip_account)
-
-        # Step 5: Create SIP user
-        if not await self.create_sip_user(
-            sip_account, device_name, gateway_id, device_id
-        ):
-            raise BticinoProvisioningError("Failed to create SIP user")
-
-        # Step 6: Get SIP password from the created user
+        # Step 4: Check for existing SIP user with same device name, or create new one
         sip_users = await self.get_sip_users(plant_id, gateway_id)
-        sip_password = None
+
+        existing_user = None
         for user in sip_users:
-            if user.get("SipAccount") == sip_account:
-                sip_password = user.get("SipPassword")
+            if user.get("DeviceName") == device_name:
+                existing_user = user
+                _LOGGER.debug("Found existing SIP user: %s", user.get("SipAccount"))
                 break
+
+        if existing_user:
+            # Use existing user
+            sip_account = existing_user.get("SipAccount")
+            sip_password = existing_user.get("SipPassword")
+            device_id = existing_user.get("IdDevice", secrets.token_hex(6).upper())
+            _LOGGER.info("Reusing existing SIP account: %s", sip_account)
+        else:
+            # Create new SIP user
+            device_id = secrets.token_hex(6).upper()
+            email_part = self._email.replace("@", "-").replace(".", "-")
+            sip_account = f"{email_part}-{device_id}@{gateway_id}.bs.iotleg.com"
+
+            _LOGGER.debug("Creating SIP account: %s", sip_account)
+
+            if not await self.create_sip_user(
+                sip_account, device_name, gateway_id, device_id
+            ):
+                raise BticinoProvisioningError("Failed to create SIP user")
+
+            # Get SIP password from the created user
+            sip_users = await self.get_sip_users(plant_id, gateway_id)
+            sip_password = None
+            for user in sip_users:
+                if user.get("SipAccount") == sip_account:
+                    sip_password = user.get("SipPassword")
+                    break
 
         if not sip_password:
             raise BticinoProvisioningError("Could not retrieve SIP password")
