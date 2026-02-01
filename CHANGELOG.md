@@ -2,7 +2,7 @@
 
 Tutte le modifiche significative a questo progetto saranno documentate in questo file.
 
-## [0.3.0] - 2025-02-01
+## [2.0.5] - 2025-02-01
 
 ### Risolti
 
@@ -35,7 +35,7 @@ Tutte le modifiche significative a questo progetto saranno documentate in questo
 
 ---
 
-## [0.2.0] - 2025-02-01
+## [2.0.3] - 2025-02-01
 
 ### Risolti
 
@@ -75,7 +75,7 @@ Tutte le modifiche significative a questo progetto saranno documentate in questo
 
 ---
 
-## [0.1.0] - 2025-01-XX (Release iniziale)
+## [2.0.0] - 2025-01-XX (Release iniziale)
 
 ### Aggiunto
 
