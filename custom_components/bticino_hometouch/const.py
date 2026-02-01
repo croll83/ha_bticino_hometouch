@@ -8,6 +8,7 @@ CONF_PASSWORD = "password"
 CONF_GATEWAY_MAC = "gateway_mac"
 CONF_NUM_CAMERAS = "num_cameras"
 CONF_NUM_LOCKS = "num_locks"
+CONF_APARTMENT_CODE = "apartment_code"
 
 # Configuration keys - Auto-discovered/generated
 CONF_SIP_SERVER = "sip_server"
@@ -34,6 +35,7 @@ DEFAULT_SIP_PORT = 5228
 DEFAULT_NUM_CAMERAS = 1
 DEFAULT_NUM_LOCKS = 1
 DEFAULT_DEVICE_NAME = "HomeAssistant"
+DEFAULT_APARTMENT_CODE = ""  # Empty means no apartment code in command
 
 # BTicino API
 BTICINO_API_BASE = "https://www.myhomeweb.com"

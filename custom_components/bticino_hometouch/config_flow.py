@@ -26,6 +26,7 @@ from .const import (
     CONF_GATEWAY_MAC,
     CONF_NUM_CAMERAS,
     CONF_NUM_LOCKS,
+    CONF_APARTMENT_CODE,
     CONF_SIP_SERVER,
     CONF_SIP_PORT,
     CONF_SIP_USERNAME,
@@ -45,6 +46,7 @@ from .const import (
     DEFAULT_SIP_PORT,
     DEFAULT_NUM_CAMERAS,
     DEFAULT_NUM_LOCKS,
+    DEFAULT_APARTMENT_CODE,
 )
 from .bticino_api import BticinoApi, BticinoAuthError, BticinoProvisioningError
 
@@ -67,6 +69,9 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
         ),
         vol.Required(CONF_NUM_LOCKS, default=DEFAULT_NUM_LOCKS): NumberSelector(
             NumberSelectorConfig(min=1, max=10, step=1, mode=NumberSelectorMode.BOX)
+        ),
+        vol.Optional(CONF_APARTMENT_CODE, default=DEFAULT_APARTMENT_CODE): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.TEXT)
         ),
     }
 )
@@ -133,6 +138,8 @@ async def validate_and_provision(
         CONF_LOCK_COMMANDS: ["A"] * num_locks,
         # Gateway address placeholder (will be discovered or set later)
         CONF_GATEWAY_ADDRESS: data.get(CONF_GATEWAY_MAC, ""),
+        # Apartment code for door unlock commands
+        CONF_APARTMENT_CODE: data.get(CONF_APARTMENT_CODE, DEFAULT_APARTMENT_CODE),
     }
 
 

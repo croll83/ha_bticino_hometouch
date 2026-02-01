@@ -9,14 +9,16 @@
           "password": "Password",
           "gateway_mac": "Indirizzo MAC del Gateway",
           "num_cameras": "Numero di Posti Esterni",
-          "num_locks": "Numero di Serrature"
+          "num_locks": "Numero di Serrature",
+          "apartment_code": "Codice Appartamento (opzionale)"
         },
         "data_description": {
           "email": "La tua email dell'account BTicino",
           "password": "La tua password dell'account BTicino",
           "gateway_mac": "Indirizzo MAC del gateway (es. 00:03:50:B2:0E:1F)",
           "num_cameras": "Quanti posti esterni/telecamere hai?",
-          "num_locks": "Quante serrature hai?"
+          "num_locks": "Quante serrature hai?",
+          "apartment_code": "Codice OpenWebNet appartamento/unita' per i comandi serratura (lascia vuoto se non sei sicuro)"
         }
       }
     },

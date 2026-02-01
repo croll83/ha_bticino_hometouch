@@ -9,14 +9,16 @@
           "password": "Password",
           "gateway_mac": "Gateway MAC Address",
           "num_cameras": "Number of Outdoor Stations",
-          "num_locks": "Number of Locks"
+          "num_locks": "Number of Locks",
+          "apartment_code": "Apartment Code (optional)"
         },
         "data_description": {
           "email": "Your BTicino account email",
           "password": "Your BTicino account password",
           "gateway_mac": "MAC address of your gateway (e.g., 00:03:50:B2:0E:1F)",
           "num_cameras": "How many outdoor stations/cameras do you have?",
-          "num_locks": "How many door locks do you have?"
+          "num_locks": "How many door locks do you have?",
+          "apartment_code": "OpenWebNet apartment/unit code for door commands (leave empty if unsure)"
         }
       }
     },

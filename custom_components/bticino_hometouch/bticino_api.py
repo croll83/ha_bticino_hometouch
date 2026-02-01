@@ -386,6 +386,13 @@ class BticinoApi:
         # Build result
         sip_domain = f"{gateway_id}.bs.iotleg.com"
 
+        # Extract username part (without domain) for SIP REGISTER
+        # sip_account might be "user@domain" or just "user"
+        if "@" in sip_account:
+            sip_username = sip_account.split("@")[0]
+        else:
+            sip_username = sip_account
+
         return ProvisioningResult(
             plant_id=plant_id,
             gateway_id=gateway_id,
@@ -397,7 +404,7 @@ class BticinoApi:
             ca_cert=ca_chain_pem.decode("utf-8"),
             cert_expiry=cert_expiry,
             sip_domain=sip_domain,
-            sip_username=sip_account,
+            sip_username=sip_username,
         )
 
     async def renew_certificate(

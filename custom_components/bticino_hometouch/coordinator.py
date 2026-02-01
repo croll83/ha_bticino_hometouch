@@ -25,10 +25,12 @@ from .const import (
     CONF_NUM_CAMERAS,
     CONF_NUM_LOCKS,
     CONF_LOCK_COMMANDS,
+    CONF_APARTMENT_CODE,
     EVENT_INCOMING_CALL,
     EVENT_CALL_ENDED,
     DEFAULT_NUM_CAMERAS,
     DEFAULT_NUM_LOCKS,
+    DEFAULT_APARTMENT_CODE,
 )
 from .sip_client import SIPClient, SIPConfig, SIPCall, CallState
 from .media_proxy import MediaProxyManager
@@ -118,6 +120,7 @@ class BticinoCoordinator(DataUpdateCoordinator):
             client_cert=self._config[CONF_CLIENT_CERT],
             client_key=self._config[CONF_CLIENT_KEY],
             ca_cert=self._config[CONF_CA_CERT],
+            apartment_code=self._config.get(CONF_APARTMENT_CODE, DEFAULT_APARTMENT_CODE),
         )
 
         self._sip_client = SIPClient(

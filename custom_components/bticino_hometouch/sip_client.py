@@ -50,6 +50,7 @@ class SIPConfig:
     ca_cert: str
     local_ip: str = ""
     local_port: int = 5060
+    apartment_code: str = ""  # OpenWebNet apartment/unit address
 
 
 @dataclass
@@ -101,10 +102,29 @@ class SIPClient:
         self._call_id_counter = 0
         self._registration_call_id = ""
         self._registration_cseq = 0
+        self._auth_in_progress = False
+        self._auth_attempts = 0
+
+        # For MESSAGE auth handling
+        self._message_auth_event: asyncio.Event | None = None
+        self._message_response_code: int = 0
+        self._proxy_realm: str = ""
+        self._proxy_nonce: str = ""
+        self._proxy_opaque: str = ""
+        self._proxy_algorithm: str = "MD5"
+        self._proxy_nc: int = 0  # nonce count
 
         # Determine local IP
         if not config.local_ip:
             self._config.local_ip = self._get_local_ip()
+
+        # Fix username if it contains domain (legacy config)
+        if "@" in self._config.username:
+            _LOGGER.warning(
+                "Username contains domain (%s), extracting user part only",
+                self._config.username
+            )
+            self._config.username = self._config.username.split("@")[0]
 
     def _get_local_ip(self) -> str:
         """Get local IP address."""
@@ -260,7 +280,7 @@ class SIPClient:
             f"CSeq: {self._registration_cseq} REGISTER",
             f"Contact: {contact}",
             "Max-Forwards: 70",
-            "Expires: 5184000",
+            "Expires: 3600",  # 1 hour registration
             f"User-Agent: HomeAssistant-BTicino/1.0",
         ]
 
@@ -273,7 +293,7 @@ class SIPClient:
 
         return "\r\n".join(lines)
 
-    def _build_message_request(self, to_uri: str, body: str, call: SIPCall | None = None) -> str:
+    def _build_message_request(self, to_uri: str, body: str, call: SIPCall | None = None, auth_header: str = "") -> str:
         """Build a MESSAGE request for door unlock."""
         branch = self._generate_branch()
         tag = self._generate_tag()
@@ -294,10 +314,16 @@ class SIPClient:
             f"CSeq: {cseq} MESSAGE",
             "Max-Forwards: 70",
             "Content-Type: text/plain",
+        ]
+
+        if auth_header:
+            lines.append(auth_header)
+
+        lines.extend([
             f"Content-Length: {len(body)}",
             "",
             body,
-        ]
+        ])
 
         return "\r\n".join(lines)
 
@@ -307,6 +333,15 @@ class SIPClient:
         Args:
             lock_id: Lock identifier (1, 2, or 3)
             command_type: "A" for *8*19/*8*20, "B" for *8*21/*8*22
+
+        OpenWebNet command format:
+            *8*19*<where>## - Open door
+            *8*20*<where>## - Close door (release relay)
+
+        Where <where> can be:
+            - Empty: simple installations
+            - Apartment code: for multi-apartment systems
+            - Lock address: specific lock in the system
         """
         # Determine command based on type
         if command_type == "A":
@@ -316,32 +351,147 @@ class SIPClient:
             open_cmd = "*8*21"
             close_cmd = "*8*22"
 
-        # Format: *8*19*4## for apartment 4
-        # The "4" seems to be the apartment/unit number
-        apartment = "4"  # TODO: make configurable
-        open_message = f"{open_cmd}*{apartment}##"
-        close_message = f"{close_cmd}*{apartment}##"
+        # Build the WHERE part of the command
+        # If apartment_code is configured, use it; otherwise try simple format
+        if self._config.apartment_code:
+            where = self._config.apartment_code
+        else:
+            # Try lock_id as the where parameter
+            where = str(lock_id)
 
-        to_uri = f"{SIP_MHT_PREFIX}{self._config.gateway_address}"
+        open_message = f"{open_cmd}*{where}##"
+        close_message = f"{close_cmd}*{where}##"
+
+        # Use domain for remote connection, not MAC address
+        # The MHT (MyHomeTouch) is addressed via the SIP domain
+        to_uri = f"{SIP_MHT_PREFIX}{self._config.domain}"
+
+        _LOGGER.debug("Sending door unlock: %s to %s", open_message, to_uri)
 
         try:
-            # Send open command
-            request1 = self._build_message_request(to_uri, open_message)
-            await self._send(request1)
+            # Send open command and wait for response
+            response = await self._send_message_with_auth(to_uri, open_message)
+            if not response:
+                _LOGGER.error("Failed to send open command")
+                return False
 
             # Brief delay
             await asyncio.sleep(0.1)
 
             # Send close command
-            request2 = self._build_message_request(to_uri, close_message)
-            await self._send(request2)
+            response = await self._send_message_with_auth(to_uri, close_message)
+            if not response:
+                _LOGGER.error("Failed to send close command")
+                return False
 
-            _LOGGER.info("Door unlock command sent for lock %d", lock_id)
+            _LOGGER.debug("Door unlock command sent for lock %d (where=%s)", lock_id, where)
             return True
 
         except Exception as e:
             _LOGGER.error("Failed to send door unlock: %s", e)
             return False
+
+    async def _send_message_with_auth(self, to_uri: str, body: str) -> bool:
+        """Send a MESSAGE request, handling 407 Proxy Authentication Required.
+
+        Strategy: Send without auth first, wait for 407, then retry with the
+        fresh nonce from the 407 response.
+        """
+        max_attempts = 3
+
+        for attempt in range(max_attempts):
+            # Create event to wait for response
+            self._message_auth_event = asyncio.Event()
+            self._message_response_code = 0
+
+            # Build request - with or without auth based on whether we have nonce
+            if self._proxy_nonce and attempt > 0:
+                # After first 407, use the nonce we just received
+                auth_header = self._build_proxy_auth_header(to_uri)
+                request = self._build_message_request(to_uri, body, auth_header=auth_header)
+                _LOGGER.debug("Sending MESSAGE with proxy auth (attempt %d, nonce=%s...)",
+                             attempt + 1, self._proxy_nonce[:8] if self._proxy_nonce else "none")
+            else:
+                # First attempt without auth
+                request = self._build_message_request(to_uri, body)
+                _LOGGER.debug("Sending MESSAGE without auth (attempt %d)", attempt + 1)
+
+            await self._send(request)
+
+            # Wait for response (with timeout)
+            try:
+                await asyncio.wait_for(self._message_auth_event.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                _LOGGER.warning("MESSAGE response timeout on attempt %d", attempt + 1)
+                continue
+
+            # Check response
+            if self._message_response_code == 200 or self._message_response_code == 202:
+                _LOGGER.debug("MESSAGE delivered successfully (code %d)", self._message_response_code)
+                return True
+            elif self._message_response_code == 407:
+                # We got 407 and cached the new nonce - retry
+                _LOGGER.debug("Got 407, will retry with fresh nonce")
+                continue
+            elif self._message_response_code == 100:
+                # Provisional response, wait more
+                try:
+                    self._message_auth_event.clear()
+                    await asyncio.wait_for(self._message_auth_event.wait(), timeout=2.0)
+                    if self._message_response_code == 200 or self._message_response_code == 202:
+                        return True
+                except asyncio.TimeoutError:
+                    pass
+            else:
+                _LOGGER.warning("MESSAGE failed with code %d", self._message_response_code)
+
+        _LOGGER.error("MESSAGE failed after %d attempts", max_attempts)
+        return False
+
+    def _build_proxy_auth_header(self, to_uri: str) -> str:
+        """Build Proxy-Authorization header for MESSAGE requests."""
+        realm = self._proxy_realm or self._config.domain
+        nonce = self._proxy_nonce
+        opaque = self._proxy_opaque
+        algorithm = self._proxy_algorithm or "MD5"
+
+        if not nonce:
+            return ""
+
+        # Increment nonce count
+        self._proxy_nc += 1
+        nc = f"{self._proxy_nc:08x}"  # 8-digit hex
+
+        # Generate cnonce (client nonce)
+        cnonce = hashlib.md5(f"{time.time()}{random.random()}".encode()).hexdigest()[:16]
+
+        # For Digest auth, we need username:realm:password
+        username = self._config.username
+        password = self._config.password
+
+        _LOGGER.debug("Building Proxy-Auth: user=%s, realm=%s, uri=%s, nc=%s", username, realm, to_uri, nc)
+
+        # Calculate digest with qop=auth
+        ha1 = hashlib.md5(f"{username}:{realm}:{password}".encode()).hexdigest()
+        ha2 = hashlib.md5(f"MESSAGE:{to_uri}".encode()).hexdigest()
+        # With qop=auth: response = MD5(HA1:nonce:nc:cnonce:qop:HA2)
+        response_hash = hashlib.md5(f"{ha1}:{nonce}:{nc}:{cnonce}:auth:{ha2}".encode()).hexdigest()
+
+        _LOGGER.debug("Digest: HA1=%s, HA2=%s, response=%s", ha1[:8], ha2[:8], response_hash[:8])
+
+        # Build header with all required fields including nc and cnonce
+        header = (
+            f'Proxy-Authorization: Digest username="{username}", '
+            f'realm="{realm}", nonce="{nonce}", uri="{to_uri}", '
+            f'nc={nc}, cnonce="{cnonce}", qop=auth, '
+            f'response="{response_hash}", algorithm={algorithm}'
+        )
+
+        # Add opaque if provided by server
+        if opaque:
+            header = header.replace(f', algorithm={algorithm}', f', opaque="{opaque}", algorithm={algorithm}')
+
+        return header
 
     async def answer_call(self, call_id: str) -> bool:
         """Answer an incoming call."""
@@ -476,39 +626,43 @@ class SIPClient:
         if not self._writer:
             raise ConnectionError("Not connected")
 
+        # Log SIP messages - truncate for normal operations, debug level
         _LOGGER.debug("Sending SIP message:\n%s", message[:500])
         self._writer.write(message.encode('utf-8'))
         await self._writer.drain()
 
     async def _receive_loop(self):
         """Receive loop for SIP messages."""
-        buffer = ""
+        buffer = b""  # Use bytes buffer for more reliable handling
 
         while self._running and self._reader:
             try:
-                data = await self._reader.read(4096)
+                data = await self._reader.read(8192)  # Larger buffer
                 if not data:
                     break
 
-                buffer += data.decode('utf-8', errors='ignore')
+                buffer += data
 
                 # Parse complete messages
-                while "\r\n\r\n" in buffer:
-                    header_end = buffer.index("\r\n\r\n")
-                    header = buffer[:header_end]
+                while b"\r\n\r\n" in buffer:
+                    header_end = buffer.index(b"\r\n\r\n")
+                    header = buffer[:header_end].decode('utf-8', errors='ignore')
 
                     # Check for Content-Length
                     content_length = 0
                     for line in header.split("\r\n"):
                         if line.lower().startswith("content-length:"):
-                            content_length = int(line.split(":")[1].strip())
+                            try:
+                                content_length = int(line.split(":")[1].strip())
+                            except ValueError:
+                                pass
                             break
 
                     message_end = header_end + 4 + content_length
                     if len(buffer) < message_end:
                         break  # Wait for more data
 
-                    message = buffer[:message_end]
+                    message = buffer[:message_end].decode('utf-8', errors='ignore')
                     buffer = buffer[message_end:]
 
                     await self._handle_message(message)
@@ -517,6 +671,8 @@ class SIPClient:
                 break
             except Exception as e:
                 _LOGGER.error("Error in receive loop: %s", e)
+                import traceback
+                _LOGGER.debug(traceback.format_exc())
                 break
 
         self._running = False
@@ -524,6 +680,7 @@ class SIPClient:
 
     async def _handle_message(self, message: str):
         """Handle a received SIP message."""
+        # Log received SIP messages at debug level (truncated)
         _LOGGER.debug("Received SIP message:\n%s", message[:500])
 
         lines = message.split("\r\n")
@@ -563,20 +720,34 @@ class SIPClient:
         if cseq_method == "REGISTER":
             await self._handle_register_response(status_code, message)
         elif cseq_method == "MESSAGE":
-            _LOGGER.debug("MESSAGE response: %d", status_code)
+            await self._handle_message_response(status_code, message)
         elif cseq_method in ("INVITE", "UPDATE", "BYE"):
             await self._handle_call_response(status_code, message, cseq_method)
 
     async def _handle_register_response(self, status_code: int, message: str):
         """Handle REGISTER response."""
+        _LOGGER.debug("REGISTER response: %d (current state: %s)", status_code, self._registration_state)
+
         if status_code == 200:
             self._registration_state = RegistrationState.REGISTERED
+            self._auth_in_progress = False
+            self._auth_attempts = 0
             _LOGGER.info("Successfully registered with SIP server")
 
             # Schedule re-registration
             self._register_task = asyncio.create_task(self._reregister_loop())
 
         elif status_code == 401:
+            # Track auth attempts to prevent infinite loops
+            if not hasattr(self, '_auth_attempts'):
+                self._auth_attempts = 0
+            self._auth_attempts += 1
+
+            if self._auth_attempts > 3:
+                _LOGGER.error("Too many authentication attempts, giving up")
+                self._registration_state = RegistrationState.FAILED
+                return
+
             # Need authentication
             # Parse WWW-Authenticate header and retry with credentials
             await self._handle_auth_challenge(message)
@@ -587,46 +758,108 @@ class SIPClient:
 
     async def _handle_auth_challenge(self, message: str):
         """Handle authentication challenge."""
-        # Parse WWW-Authenticate header
-        www_auth = ""
-        for line in message.split("\r\n"):
-            if line.lower().startswith("www-authenticate:"):
-                www_auth = line[17:].strip()
-                break
-
-        if not www_auth:
+        # Prevent handling if we already sent auth
+        if hasattr(self, '_auth_in_progress') and self._auth_in_progress:
+            _LOGGER.debug("Auth already in progress, ignoring duplicate 401")
             return
 
-        # Parse realm and nonce
-        realm_match = re.search(r'realm="([^"]+)"', www_auth)
-        nonce_match = re.search(r'nonce="([^"]+)"', www_auth)
+        self._auth_in_progress = True
 
-        if not realm_match or not nonce_match:
-            return
+        try:
+            # Parse WWW-Authenticate header
+            www_auth = ""
+            for line in message.split("\r\n"):
+                if line.lower().startswith("www-authenticate:"):
+                    www_auth = line[17:].strip()
+                    break
 
-        realm = realm_match.group(1)
-        nonce = nonce_match.group(1)
+            if not www_auth:
+                _LOGGER.error("No WWW-Authenticate header found in 401 response")
+                self._registration_state = RegistrationState.FAILED
+                return
 
-        # Calculate digest response
-        ha1 = hashlib.md5(
-            f"{self._config.username}:{realm}:{self._config.password}".encode()
-        ).hexdigest()
+            _LOGGER.debug("WWW-Authenticate: %s", www_auth)
 
-        uri = f"sip:{self._config.domain}"
-        ha2 = hashlib.md5(f"REGISTER:{uri}".encode()).hexdigest()
+            # Parse realm and nonce
+            realm_match = re.search(r'realm="([^"]+)"', www_auth)
+            nonce_match = re.search(r'nonce="([^"]+)"', www_auth)
 
-        response = hashlib.md5(f"{ha1}:{nonce}:{ha2}".encode()).hexdigest()
+            if not realm_match or not nonce_match:
+                _LOGGER.error("Could not parse realm/nonce from WWW-Authenticate: %s", www_auth)
+                self._registration_state = RegistrationState.FAILED
+                return
 
-        # Build Authorization header
-        auth_header = (
-            f'Authorization: Digest username="{self._config.username}", '
-            f'realm="{realm}", nonce="{nonce}", uri="{uri}", response="{response}"'
-        )
+            realm = realm_match.group(1)
+            nonce = nonce_match.group(1)
 
-        # Send REGISTER with auth
-        self._registration_cseq += 1
-        request = self._build_register_request(auth_header)
-        await self._send(request)
+            _LOGGER.debug("Parsed realm=%s, nonce=%s", realm, nonce)
+
+            # Calculate digest response
+            ha1 = hashlib.md5(
+                f"{self._config.username}:{realm}:{self._config.password}".encode()
+            ).hexdigest()
+
+            uri = f"sip:{self._config.domain}"
+            ha2 = hashlib.md5(f"REGISTER:{uri}".encode()).hexdigest()
+
+            response = hashlib.md5(f"{ha1}:{nonce}:{ha2}".encode()).hexdigest()
+
+            # Build Authorization header
+            auth_header = (
+                f'Authorization: Digest username="{self._config.username}", '
+                f'realm="{realm}", nonce="{nonce}", uri="{uri}", response="{response}"'
+            )
+
+            _LOGGER.info("Sending REGISTER with Digest authentication")
+
+            # Send REGISTER with auth
+            self._registration_cseq += 1
+            request = self._build_register_request(auth_header)
+            await self._send(request)
+
+        finally:
+            # Reset after a delay to allow retries if auth fails
+            await asyncio.sleep(2)
+            self._auth_in_progress = False
+
+    async def _handle_message_response(self, status_code: int, message: str):
+        """Handle MESSAGE response, especially 407 Proxy Authentication Required."""
+        _LOGGER.debug("MESSAGE response: %d", status_code)
+
+        # Store the response code for the waiting coroutine
+        self._message_response_code = status_code
+
+        if status_code == 407:
+            # Parse Proxy-Authenticate header and cache nonce for retry
+            proxy_auth = ""
+            for line in message.split("\r\n"):
+                if line.lower().startswith("proxy-authenticate:"):
+                    proxy_auth = line[19:].strip()
+                    break
+
+            if proxy_auth:
+                realm_match = re.search(r'realm="([^"]+)"', proxy_auth)
+                nonce_match = re.search(r'nonce="([^"]+)"', proxy_auth)
+                opaque_match = re.search(r'opaque="([^"]+)"', proxy_auth)
+                algo_match = re.search(r'algorithm=(\w+)', proxy_auth)
+
+                if realm_match and nonce_match:
+                    self._proxy_realm = realm_match.group(1)
+                    self._proxy_nonce = nonce_match.group(1)
+                    self._proxy_nc = 0  # Reset nonce count for new nonce
+                    if opaque_match:
+                        self._proxy_opaque = opaque_match.group(1)
+                    if algo_match:
+                        self._proxy_algorithm = algo_match.group(1)
+                    _LOGGER.debug("Cached proxy auth: realm=%s, nonce=%s, opaque=%s, algo=%s",
+                                self._proxy_realm, self._proxy_nonce, self._proxy_opaque, self._proxy_algorithm)
+
+        # Signal the waiting coroutine (for any non-provisional response)
+        if self._message_auth_event and status_code != 100:
+            self._message_auth_event.set()
+        elif self._message_auth_event and status_code == 100:
+            # For 100 Trying, still signal but the caller will wait for final response
+            pass
 
     async def _handle_call_response(self, status_code: int, message: str, method: str):
         """Handle call-related response."""
