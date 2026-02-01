@@ -10,7 +10,14 @@ from homeassistant import config_entries
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.selector import (
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
+)
 
 from .const import (
     DOMAIN,
@@ -45,16 +52,21 @@ _LOGGER = logging.getLogger(__name__)
 
 
 # Simple setup schema - just email, password, MAC, and device counts
+# Using NumberSelector with BOX mode for text input instead of slider
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_EMAIL): str,
-        vol.Required(CONF_PASSWORD): str,
-        vol.Required(CONF_GATEWAY_MAC): str,
-        vol.Required(CONF_NUM_CAMERAS, default=DEFAULT_NUM_CAMERAS): vol.All(
-            vol.Coerce(int), vol.Range(min=1, max=10)
+        vol.Required(CONF_EMAIL): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.EMAIL)
         ),
-        vol.Required(CONF_NUM_LOCKS, default=DEFAULT_NUM_LOCKS): vol.All(
-            vol.Coerce(int), vol.Range(min=1, max=10)
+        vol.Required(CONF_PASSWORD): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.PASSWORD)
+        ),
+        vol.Required(CONF_GATEWAY_MAC): TextSelector(),
+        vol.Required(CONF_NUM_CAMERAS, default=DEFAULT_NUM_CAMERAS): NumberSelector(
+            NumberSelectorConfig(min=1, max=10, step=1, mode=NumberSelectorMode.BOX)
+        ),
+        vol.Required(CONF_NUM_LOCKS, default=DEFAULT_NUM_LOCKS): NumberSelector(
+            NumberSelectorConfig(min=1, max=10, step=1, mode=NumberSelectorMode.BOX)
         ),
     }
 )
@@ -212,7 +224,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             )
             return self.async_create_entry(title="", data={})
 
-        # Show current settings
+        # Show current settings with BOX mode for number inputs
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
@@ -222,17 +234,21 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         default=self.config_entry.data.get(
                             CONF_NUM_CAMERAS, DEFAULT_NUM_CAMERAS
                         ),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=1, max=10)),
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=1, max=10, step=1, mode=NumberSelectorMode.BOX)
+                    ),
                     vol.Required(
                         CONF_NUM_LOCKS,
                         default=self.config_entry.data.get(
                             CONF_NUM_LOCKS, DEFAULT_NUM_LOCKS
                         ),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=1, max=10)),
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=1, max=10, step=1, mode=NumberSelectorMode.BOX)
+                    ),
                     vol.Optional(
                         CONF_GATEWAY_ADDRESS,
                         default=self.config_entry.data.get(CONF_GATEWAY_ADDRESS, ""),
-                    ): str,
+                    ): TextSelector(),
                 }
             ),
         )
