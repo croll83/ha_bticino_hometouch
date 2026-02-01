@@ -37,144 +37,143 @@ class AudioConfig:
 
 
 class Go2RTCProxy:
-    """Manages go2rtc for SRTP to RTSP conversion."""
+    """Connects to existing go2rtc add-on for SRTP to RTSP conversion.
+
+    This class uses the go2rtc add-on that's already installed in Home Assistant
+    instead of trying to start its own process.
+    """
+
+    # Common go2rtc add-on hostnames
+    ADDON_HOSTNAMES = [
+        "a889bffc-go2rtc",  # Standard add-on hostname
+        "homeassistant",     # Fallback
+        "localhost",         # Local fallback
+        "127.0.0.1",         # IP fallback
+    ]
 
     def __init__(
         self,
-        go2rtc_path: str = "/config/go2rtc/go2rtc",
-        config_dir: str = "/config/go2rtc",
         api_port: int = 1984,
         rtsp_port: int = 8554,
         webrtc_port: int = 8555,
+        addon_hostname: str | None = None,
+        **kwargs,  # Accept but ignore extra args for backward compatibility
     ):
         """Initialize go2rtc proxy."""
-        self._go2rtc_path = go2rtc_path
-        self._config_dir = Path(config_dir)
         self._api_port = api_port
         self._rtsp_port = rtsp_port
         self._webrtc_port = webrtc_port
-        self._process: subprocess.Popen | None = None
+        self._addon_hostname = addon_hostname
         self._streams: dict[str, StreamConfig] = {}
         self._running = False
+        self._api_base_url: str | None = None
 
     async def start(self) -> bool:
-        """Start go2rtc process."""
-        try:
-            # Create config directory
-            self._config_dir.mkdir(parents=True, exist_ok=True)
+        """Connect to go2rtc add-on."""
+        import aiohttp
 
-            # Generate initial config
-            await self._write_config()
+        # Try to find the go2rtc add-on
+        for hostname in ([self._addon_hostname] if self._addon_hostname else self.ADDON_HOSTNAMES):
+            api_url = f"http://{hostname}:{self._api_port}"
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(f"{api_url}/api", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                        if resp.status == 200:
+                            self._api_base_url = api_url
+                            self._running = True
+                            _LOGGER.info("Connected to go2rtc add-on at %s", api_url)
+                            return True
+            except Exception as e:
+                _LOGGER.debug("go2rtc not found at %s: %s", hostname, e)
+                continue
 
-            # Start go2rtc
-            self._process = await asyncio.create_subprocess_exec(
-                self._go2rtc_path,
-                "-config", str(self._config_dir / "go2rtc.yaml"),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-
-            self._running = True
-            _LOGGER.info("go2rtc started on RTSP port %d", self._rtsp_port)
-            return True
-
-        except Exception as e:
-            _LOGGER.error("Failed to start go2rtc: %s", e)
-            return False
+        _LOGGER.warning(
+            "go2rtc add-on not found. Please install the go2rtc add-on from "
+            "Settings -> Add-ons -> Add-on Store -> go2rtc"
+        )
+        return False
 
     async def stop(self):
-        """Stop go2rtc process."""
+        """Disconnect from go2rtc add-on."""
         self._running = False
-        if self._process:
-            self._process.terminate()
-            try:
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                self._process.kill()
-            self._process = None
+        self._api_base_url = None
+        self._streams.clear()
 
-    async def _write_config(self):
-        """Write go2rtc configuration file."""
-        config = {
-            "api": {
-                "listen": f":{self._api_port}",
-            },
-            "rtsp": {
-                "listen": f":{self._rtsp_port}",
-            },
-            "webrtc": {
-                "listen": f":{self._webrtc_port}",
-                "candidates": ["stun:stun.l.google.com:19302"],
-            },
-            "streams": {},
-        }
-
-        # Add configured streams
-        for name, stream in self._streams.items():
-            config["streams"][name] = self._build_stream_source(stream)
-
-        config_path = self._config_dir / "go2rtc.yaml"
-        with open(config_path, 'w') as f:
-            import yaml
-            yaml.dump(config, f, default_flow_style=False)
-
-    def _build_stream_source(self, stream: StreamConfig) -> list[str]:
+    def _build_stream_source(self, stream: StreamConfig) -> str:
         """Build stream source URL for go2rtc."""
-        # SRTP source with key
-        key_hex = stream.srtp_key.hex()
-        sources = [
-            f"ffmpeg:srtp://127.0.0.1:{stream.rtp_port}?pkt_size=1316"
-            f"#video={stream.codec}"
-            f"#input=-protocol_whitelist file,udp,rtp,srtp -i srtp://127.0.0.1:{stream.rtp_port}"
-        ]
-        return sources
+        # For SRTP streams received via RTP, we use ffmpeg input
+        # The SRTP decryptor forwards decrypted RTP to this port
+        return f"ffmpeg:rtp://127.0.0.1:{stream.rtp_port}#video={stream.codec}"
 
     async def add_stream(
         self,
         name: str,
         stream: StreamConfig,
     ) -> str:
-        """Add a new stream and return RTSP URL."""
+        """Add a new stream via go2rtc API and return RTSP URL."""
+        if not self._running or not self._api_base_url:
+            _LOGGER.error("go2rtc not connected")
+            return ""
+
         self._streams[name] = stream
+        source = self._build_stream_source(stream)
 
-        # Update config and reload
-        await self._write_config()
-        await self._reload_config()
-
-        return f"rtsp://localhost:{self._rtsp_port}/{name}"
-
-    async def remove_stream(self, name: str):
-        """Remove a stream."""
-        if name in self._streams:
-            del self._streams[name]
-            await self._write_config()
-            await self._reload_config()
-
-    async def _reload_config(self):
-        """Reload go2rtc configuration via API."""
+        # Add stream via API
         import aiohttp
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"http://localhost:{self._api_port}/api/config/reload"
+                # go2rtc API: PUT /api/streams?name=xxx&src=yyy
+                async with session.put(
+                    f"{self._api_base_url}/api/streams",
+                    params={"name": name, "src": source},
+                    timeout=aiohttp.ClientTimeout(total=10)
                 ) as resp:
-                    return resp.status == 200
+                    if resp.status in (200, 201):
+                        _LOGGER.info("Added stream %s to go2rtc", name)
+                    else:
+                        _LOGGER.warning("Failed to add stream %s: HTTP %d", name, resp.status)
         except Exception as e:
-            _LOGGER.warning("Failed to reload go2rtc config: %s", e)
-            return False
+            _LOGGER.error("Failed to add stream %s to go2rtc: %s", name, e)
+
+        return self.get_rtsp_url(name)
+
+    async def remove_stream(self, name: str):
+        """Remove a stream via go2rtc API."""
+        if name in self._streams:
+            del self._streams[name]
+
+        if not self._running or not self._api_base_url:
+            return
+
+        import aiohttp
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.delete(
+                    f"{self._api_base_url}/api/streams",
+                    params={"name": name},
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    if resp.status == 200:
+                        _LOGGER.info("Removed stream %s from go2rtc", name)
+        except Exception as e:
+            _LOGGER.debug("Failed to remove stream %s: %s", name, e)
 
     def get_rtsp_url(self, camera_name: str) -> str:
         """Get RTSP URL for a camera."""
-        return f"rtsp://localhost:{self._rtsp_port}/{camera_name}"
+        # Use the add-on hostname for RTSP
+        hostname = self._addon_hostname or "a889bffc-go2rtc"
+        return f"rtsp://{hostname}:{self._rtsp_port}/{camera_name}"
 
     def get_webrtc_url(self, camera_name: str) -> str:
-        """Get WebRTC URL for a camera."""
-        return f"http://localhost:{self._api_port}/api/ws?src={camera_name}"
+        """Get WebRTC API URL for a camera."""
+        if self._api_base_url:
+            return f"{self._api_base_url}/api/ws?src={camera_name}"
+        return ""
 
     @property
     def is_running(self) -> bool:
-        """Return True if go2rtc is running."""
-        return self._running and self._process is not None
+        """Return True if connected to go2rtc."""
+        return self._running
 
 
 class SRTPDecryptor:
@@ -437,7 +436,6 @@ class MediaProxyManager:
         """Initialize media proxy manager."""
         self._config_dir = Path(config_dir)
         self._go2rtc = Go2RTCProxy(
-            config_dir=str(self._config_dir / "go2rtc"),
             api_port=go2rtc_api_port,
             rtsp_port=go2rtc_rtsp_port,
         )
@@ -446,12 +444,20 @@ class MediaProxyManager:
         self._active_streams: dict[str, dict] = {}
 
     async def start(self) -> bool:
-        """Start media proxy."""
-        self._config_dir.mkdir(parents=True, exist_ok=True)
+        """Start media proxy by connecting to go2rtc add-on."""
+        # Create config directory if needed
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: self._config_dir.mkdir(parents=True, exist_ok=True)
+        )
 
-        # Start go2rtc
+        # Connect to go2rtc add-on
         if not await self._go2rtc.start():
-            _LOGGER.error("Failed to start go2rtc")
+            _LOGGER.warning(
+                "Could not connect to go2rtc add-on. "
+                "Video streaming will not be available until go2rtc is installed."
+            )
             return False
 
         return True

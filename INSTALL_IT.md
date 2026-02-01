@@ -274,7 +274,10 @@ cards:
 
 ## Automazioni
 
-### Notifica su Campanello
+> **Nota:** Le automazioni seguenti usano template dinamici per supportare impianti con piu' posti esterni.
+> L'evento `bticino_hometouch_incoming_call` include `station_id` che indica quale posto esterno sta chiamando.
+
+### Notifica su Campanello (Semplice)
 
 ```yaml
 automation:
@@ -283,10 +286,10 @@ automation:
       - platform: event
         event_type: bticino_hometouch_incoming_call
     action:
-      - service: notify.mobile_app_your_phone
+      - service: notify.mobile_app_your_phone  # Sostituisci con il tuo servizio
         data:
           title: "Campanello"
-          message: "Qualcuno ha suonato al videocitofono"
+          message: "Chiamata dal Posto Esterno {{ trigger.event.data.station_id | default(1) }}"
           data:
             actions:
               - action: "UNLOCK_DOOR"
@@ -295,7 +298,9 @@ automation:
                 title: "Ignora"
 ```
 
-### Notifica con Azioni Complete
+### Notifica con Azioni Complete (Multi-Stazione)
+
+Questa automazione passa `station_id` alle azioni per gestire correttamente impianti multi-stazione:
 
 ```yaml
 automation:
@@ -304,13 +309,16 @@ automation:
       - platform: event
         event_type: bticino_hometouch_incoming_call
     action:
-      - service: notify.mobile_app_your_phone
+      - service: notify.mobile_app_your_phone  # Sostituisci con il tuo servizio
         data:
           title: "Videocitofono"
-          message: "Chiamata in arrivo"
+          message: "Chiamata dal Posto Esterno {{ trigger.event.data.station_id | default(1) }}"
           data:
             tag: hometouch_call
             group: hometouch
+            # Passa station_id per usarlo nelle azioni
+            action_data:
+              station_id: "{{ trigger.event.data.station_id | default(1) }}"
             actions:
               - action: "ANSWER"
                 title: "Rispondi"
@@ -325,10 +333,13 @@ automation:
                 name: "default"
                 critical: 1
                 volume: 1.0
-            entity_id: camera.bticino_hometouch_outdoor_station_1
+            # Camera dinamica basata su station_id
+            entity_id: "camera.bticino_hometouch_outdoor_station_{{ trigger.event.data.station_id | default(1) }}"
 ```
 
-### Gestione Azioni Notifica
+### Gestione Azioni Notifica (Multi-Stazione)
+
+Questa automazione usa `station_id` per aprire la serratura corretta in base al posto esterno che ha chiamato:
 
 ```yaml
 automation:
@@ -340,6 +351,9 @@ automation:
       - condition: template
         value_template: "{{ trigger.event.data.action in ['ANSWER', 'UNLOCK', 'REJECT'] }}"
     action:
+      - variables:
+          # Recupera station_id passato dalla notifica (default 1)
+          station_id: "{{ trigger.event.data.action_data.station_id | default(1) }}"
       - choose:
           - conditions:
               - condition: template
@@ -355,7 +369,8 @@ automation:
             sequence:
               - service: button.press
                 target:
-                  entity_id: button.bticino_hometouch_unlock_door_1
+                  # Usa station_id per selezionare la serratura corretta
+                  entity_id: "button.bticino_hometouch_unlock_door_{{ station_id }}"
 
           - conditions:
               - condition: template
@@ -366,7 +381,7 @@ automation:
                   entity_id: button.bticino_hometouch_hangup_call
 ```
 
-### Popup su Browser (richiede browser_mod)
+### Popup su Browser (richiede browser_mod) - Multi-Stazione
 
 ```yaml
 automation:
@@ -375,19 +390,54 @@ automation:
       - platform: event
         event_type: bticino_hometouch_incoming_call
     action:
+      - variables:
+          station_id: "{{ trigger.event.data.station_id | default(1) }}"
       - service: browser_mod.popup
         data:
-          title: "Chiamata in arrivo"
+          title: "Chiamata dal Posto Esterno {{ station_id }}"
           content:
-            type: picture-entity
-            entity: camera.bticino_hometouch_outdoor_station_1
-            camera_view: live
+            type: vertical-stack
+            cards:
+              # Camera dinamica
+              - type: picture-entity
+                entity: "camera.bticino_hometouch_outdoor_station_{{ station_id }}"
+                camera_view: live
+              # Pulsanti
+              - type: horizontal-stack
+                cards:
+                  - type: button
+                    entity: "button.bticino_hometouch_unlock_door_{{ station_id }}"
+                    name: "Apri Porta"
+                    icon: mdi:door-open
+                    show_state: false
+                  - type: button
+                    entity: button.bticino_hometouch_answer_call
+                    name: "Rispondi"
+                    icon: mdi:phone
+                    show_state: false
+                  - type: button
+                    entity: button.bticino_hometouch_hangup_call
+                    name: "Chiudi"
+                    icon: mdi:phone-hangup
+                    show_state: false
           size: wide
           dismissable: false
           timeout: 60000
         target:
           device_id: all
 ```
+
+### Dati Evento Disponibili
+
+L'evento `bticino_hometouch_incoming_call` include i seguenti dati:
+
+| Campo | Descrizione | Esempio |
+|-------|-------------|---------|
+| `call_id` | ID univoco della chiamata | `abc123` |
+| `caller` | URI SIP del chiamante | `sip:station1@gateway` |
+| `station_id` | Numero del posto esterno | `1`, `2`, `3`... |
+
+Puoi usare questi dati nelle tue automazioni con `{{ trigger.event.data.campo }}`.
 
 ---
 

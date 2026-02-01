@@ -55,6 +55,8 @@ class BticinoDoorLockButton(CoordinatorEntity, ButtonEntity):
         self._attr_unique_id = f"{entry.entry_id}_lock_{lock_id}"
         self._attr_name = f"Unlock Door {lock_id}"
         self._attr_icon = "mdi:door-open"
+        # Set explicit entity_id for consistent naming
+        self.entity_id = f"button.bticino_hometouch_unlock_door_{lock_id}"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -89,6 +91,8 @@ class BticinoAnswerCallButton(CoordinatorEntity, ButtonEntity):
         self._attr_unique_id = f"{entry.entry_id}_answer_call"
         self._attr_name = "Answer Call"
         self._attr_icon = "mdi:phone"
+        # Set explicit entity_id for consistent naming
+        self.entity_id = "button.bticino_hometouch_answer_call"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -128,6 +132,8 @@ class BticinoHangupCallButton(CoordinatorEntity, ButtonEntity):
         self._attr_unique_id = f"{entry.entry_id}_hangup_call"
         self._attr_name = "Hangup Call"
         self._attr_icon = "mdi:phone-hangup"
+        # Set explicit entity_id for consistent naming
+        self.entity_id = "button.bticino_hometouch_hangup_call"
 
     @property
     def device_info(self) -> DeviceInfo:

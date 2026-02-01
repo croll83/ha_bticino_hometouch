@@ -56,9 +56,11 @@ class BticinoIntercomCamera(CoordinatorEntity, Camera):
         Camera.__init__(self)
         self._camera_id = camera_id
         self._attr_unique_id = f"{entry.entry_id}_camera_{camera_id}"
-        self._attr_name = f"Posto Esterno {camera_id}"
+        self._attr_name = f"Outdoor Station {camera_id}"
         self._attr_is_streaming = False
         self._last_image: bytes | None = None
+        # Set explicit entity_id for consistent naming
+        self.entity_id = f"camera.bticino_hometouch_outdoor_station_{camera_id}"
 
     @property
     def device_info(self) -> DeviceInfo:

@@ -132,44 +132,44 @@ class SIPClient:
 
     async def connect(self) -> bool:
         """Connect to SIP server with TLS."""
+        import tempfile
+        import os
+
+        cert_file = None
+        key_file = None
+        ca_file = None
+
         try:
-            # Create SSL context with client certificate
-            ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_REQUIRED
+            # Create SSL context in executor to avoid blocking calls
+            loop = asyncio.get_event_loop()
 
-            # Load CA certificate
-            ssl_context.load_verify_locations(cadata=self._config.ca_cert)
+            def _create_ssl_context():
+                """Create SSL context with certificates (blocking operations)."""
+                nonlocal cert_file, key_file, ca_file
 
-            # Load client certificate and key
-            ssl_context.load_cert_chain(
-                certfile=None,
-                keyfile=None,
-            )
-            # We need to use the cert/key data directly
-            # This requires writing temp files or using memory BIO
+                # Write temp cert files
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False) as f:
+                    f.write(self._config.client_cert)
+                    cert_file = f.name
 
-            import tempfile
-            import os
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False) as f:
+                    f.write(self._config.client_key)
+                    key_file = f.name
 
-            # Write temp cert files
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False) as f:
-                f.write(self._config.client_cert)
-                cert_file = f.name
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False) as f:
+                    f.write(self._config.ca_cert)
+                    ca_file = f.name
 
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False) as f:
-                f.write(self._config.client_key)
-                key_file = f.name
+                # Create SSL context
+                ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_REQUIRED
+                ctx.load_verify_locations(ca_file)
+                ctx.load_cert_chain(cert_file, key_file)
 
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False) as f:
-                f.write(self._config.ca_cert)
-                ca_file = f.name
+                return ctx
 
-            ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_REQUIRED
-            ssl_context.load_verify_locations(ca_file)
-            ssl_context.load_cert_chain(cert_file, key_file)
+            ssl_context = await loop.run_in_executor(None, _create_ssl_context)
 
             # Connect
             self._reader, self._writer = await asyncio.open_connection(
@@ -177,11 +177,6 @@ class SIPClient:
                 self._config.port,
                 ssl=ssl_context,
             )
-
-            # Clean up temp files
-            os.unlink(cert_file)
-            os.unlink(key_file)
-            os.unlink(ca_file)
 
             self._running = True
             self._recv_task = asyncio.create_task(self._receive_loop())
@@ -192,6 +187,15 @@ class SIPClient:
         except Exception as e:
             _LOGGER.error("Failed to connect to SIP server: %s", e)
             return False
+
+        finally:
+            # Clean up temp files
+            for f in [cert_file, key_file, ca_file]:
+                if f:
+                    try:
+                        os.unlink(f)
+                    except OSError:
+                        pass
 
     async def disconnect(self):
         """Disconnect from SIP server."""

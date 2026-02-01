@@ -266,7 +266,7 @@ class BticinoCoordinator(DataUpdateCoordinator):
     async def _send_notification(self, call: SIPCall, station_id: int):
         """Send push notification via Home Assistant companion app."""
         # Get camera image URL
-        camera_entity = f"camera.bticino_hometouch_camera_{station_id}"
+        camera_entity = f"camera.bticino_hometouch_outdoor_station_{station_id}"
 
         await self.hass.services.async_call(
             "notify",

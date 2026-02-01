@@ -51,6 +51,8 @@ class BticinoDoorbellSensor(CoordinatorEntity, BinarySensorEntity):
         self._attr_unique_id = f"{entry.entry_id}_doorbell"
         self._attr_name = "Doorbell"
         self._attr_icon = "mdi:doorbell"
+        # Set explicit entity_id for consistent naming
+        self.entity_id = "binary_sensor.bticino_hometouch_doorbell"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -84,6 +86,8 @@ class BticinoConnectionSensor(CoordinatorEntity, BinarySensorEntity):
         self._attr_unique_id = f"{entry.entry_id}_connection"
         self._attr_name = "Connection"
         self._attr_icon = "mdi:lan-connect"
+        # Set explicit entity_id for consistent naming
+        self.entity_id = "binary_sensor.bticino_hometouch_connection"
 
     @property
     def device_info(self) -> DeviceInfo:
