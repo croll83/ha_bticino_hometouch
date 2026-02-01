@@ -228,11 +228,12 @@ class BticinoApi:
 
         status, data, _ = await self._request("POST", "/eliot/sip/user", payload)
 
-        if status != 200:
+        # 200 OK or 201 Created are both success
+        if status not in (200, 201):
             _LOGGER.error("Failed to create SIP user: %d", status)
             return False
 
-        _LOGGER.debug("SIP user created successfully")
+        _LOGGER.debug("SIP user created successfully (status: %d)", status)
         return True
 
     async def request_certificate(
@@ -256,7 +257,8 @@ class BticinoApi:
             "POST", "/eliot/users/cert/signcert", payload
         )
 
-        if status != 200:
+        # Accept 200 OK or 201 Created
+        if status not in (200, 201):
             raise BticinoProvisioningError(f"Certificate request failed: {status}")
 
         if not isinstance(data, bytes):
