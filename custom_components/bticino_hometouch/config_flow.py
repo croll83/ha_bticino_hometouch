@@ -101,14 +101,18 @@ async def validate_and_provision(
         result.sip_account,
     )
 
+    # Convert to int (NumberSelector returns float)
+    num_cameras = int(data[CONF_NUM_CAMERAS])
+    num_locks = int(data[CONF_NUM_LOCKS])
+
     # Return full configuration
     return {
         # User input (stored for re-provisioning/renewal)
         CONF_EMAIL: email,
         CONF_PASSWORD: password,
         CONF_GATEWAY_MAC: data.get(CONF_GATEWAY_MAC, ""),
-        CONF_NUM_CAMERAS: data[CONF_NUM_CAMERAS],
-        CONF_NUM_LOCKS: data[CONF_NUM_LOCKS],
+        CONF_NUM_CAMERAS: num_cameras,
+        CONF_NUM_LOCKS: num_locks,
         # Provisioned data
         CONF_PLANT_ID: result.plant_id,
         CONF_GATEWAY_ID: result.gateway_id,
@@ -126,7 +130,7 @@ async def validate_and_provision(
         CONF_CA_CERT: result.ca_cert,
         CONF_CERT_EXPIRY: result.cert_expiry.isoformat(),
         # Lock commands (default to type A)
-        CONF_LOCK_COMMANDS: ["A"] * data[CONF_NUM_LOCKS],
+        CONF_LOCK_COMMANDS: ["A"] * num_locks,
         # Gateway address placeholder (will be discovered or set later)
         CONF_GATEWAY_ADDRESS: data.get(CONF_GATEWAY_MAC, ""),
     }
