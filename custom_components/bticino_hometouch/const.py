@@ -29,6 +29,9 @@ CONF_SIP_ACCOUNT = "sip_account"
 CONF_DEVICE_ID = "device_id"
 CONF_CERT_EXPIRY = "cert_expiry"
 
+# Network/NAT configuration
+CONF_PUBLIC_IP = "public_ip"  # Public IP for NAT traversal (optional - auto-detected if empty)
+
 # Default values
 DEFAULT_SIP_SERVER = "sipserver.bs.iotleg.com"
 DEFAULT_SIP_PORT = 5228
@@ -63,6 +66,7 @@ SDP_ATTR_CAMERASLIDING = "CAMERASLIDING"
 # Events
 EVENT_INCOMING_CALL = f"{DOMAIN}_incoming_call"
 EVENT_CALL_ENDED = f"{DOMAIN}_call_ended"
+EVENT_DOOR_UNLOCKED = f"{DOMAIN}_door_unlocked"
 
 # Services
 SERVICE_UNLOCK_DOOR = "unlock_door"

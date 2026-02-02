@@ -52,6 +52,7 @@ class SIPConfig:
     local_ip: str = ""
     local_port: int = 5060
     apartment_code: str = ""  # OpenWebNet apartment/unit address
+    public_ip: str = ""  # Public IP for NAT traversal (used in SDP for media)
 
 
 class MediaMode(Enum):
@@ -77,11 +78,25 @@ class SIPCall:
     rtp_port: int = 0
     srtp_key: bytes = b""
     video_rtp_port: int = 0
-    video_srtp_key: bytes = b""
+    video_srtp_key: bytes = b""  # OUR key sent in INVITE - server encrypts video WITH this key, we DECRYPT with it
+    video_srtp_key_remote: bytes = b""  # Server's key from 200 OK - unused for recvonly video
     audio_rtp_port: int = 0
-    audio_srtp_key: bytes = b""
+    audio_srtp_key: bytes = b""  # OUR key sent in INVITE - server decrypts our audio with this
+    audio_srtp_key_remote: bytes = b""  # Server's key from 200 OK - we decrypt server's audio with this
+    remote_audio_port: int = 0  # Server's audio port from SDP
+    remote_ip: str = ""  # Server's IP address from SDP
     devaddr: str = ""
+    station_id: int = 0  # Station number (1-10) for fixed port allocation
     media_mode: MediaMode = MediaMode.VIDEO_ONLY  # Default to video-only for camera viewing
+
+
+# Fixed port ranges for NAT traversal (user needs to forward these ports)
+# Using same ports as Linphone official app for compatibility:
+# Video: 9078 (Linphone default)
+# Audio: 7076 (Linphone default)
+# Note: These are SINGLE ports, not per-station, because BTicino only allows one call at a time
+FIXED_VIDEO_PORT = 9078  # Same as Linphone linphonerc_factory
+FIXED_AUDIO_PORT = 7076  # Same as Linphone linphonerc_factory
 
 
 class SIPClient:
@@ -108,6 +123,7 @@ class SIPClient:
         self._running = False
         self._recv_task: asyncio.Task | None = None
         self._register_task: asyncio.Task | None = None
+        self._intentional_disconnect = False  # Track if disconnect is intentional (for 407 auth)
 
         self._local_cseq = 1
         self._call_id_counter = 0
@@ -166,6 +182,26 @@ class SIPClient:
         import tempfile
         import os
 
+        # Cancel any existing receive task first to avoid race conditions
+        if self._recv_task and not self._recv_task.done():
+            _LOGGER.debug("Cancelling existing receive task before reconnect")
+            self._recv_task.cancel()
+            try:
+                await self._recv_task
+            except asyncio.CancelledError:
+                pass
+            self._recv_task = None
+
+        # Close existing connection if any
+        if self._writer:
+            try:
+                self._writer.close()
+                await self._writer.wait_closed()
+            except Exception:
+                pass
+            self._writer = None
+            self._reader = None
+
         cert_file = None
         key_file = None
         ca_file = None
@@ -210,6 +246,7 @@ class SIPClient:
             )
 
             self._running = True
+            self._intentional_disconnect = False  # Reset on new connection
             self._recv_task = asyncio.create_task(self._receive_loop())
 
             _LOGGER.info("Connected to SIP server %s:%d", self._config.server, self._config.port)
@@ -228,8 +265,14 @@ class SIPClient:
                     except OSError:
                         pass
 
-    async def disconnect(self):
-        """Disconnect from SIP server."""
+    async def disconnect(self, intentional: bool = False):
+        """Disconnect from SIP server.
+
+        Args:
+            intentional: If True, this is an intentional disconnect (e.g., for 407 auth)
+                        and auto-reconnect should not be triggered.
+        """
+        self._intentional_disconnect = intentional
         self._running = False
 
         if self._recv_task:
@@ -252,6 +295,34 @@ class SIPClient:
 
         self._registration_state = RegistrationState.UNREGISTERED
         _LOGGER.info("Disconnected from SIP server")
+
+    async def _auto_reconnect(self):
+        """Automatically reconnect to SIP server after connection loss."""
+        # Wait a bit before reconnecting
+        await asyncio.sleep(3)
+
+        if self._running:
+            # Already running again, skip
+            return
+
+        _LOGGER.info("Attempting automatic reconnection to SIP server...")
+
+        try:
+            if await self.connect():
+                if await self.register():
+                    _LOGGER.info("Successfully reconnected and re-registered")
+                else:
+                    _LOGGER.error("Reconnected but failed to register")
+            else:
+                _LOGGER.error("Failed to reconnect to SIP server")
+                # Try again after a longer delay
+                await asyncio.sleep(10)
+                asyncio.create_task(self._auto_reconnect())
+        except Exception as e:
+            _LOGGER.error("Error during auto-reconnect: %s", e)
+            # Try again
+            await asyncio.sleep(10)
+            asyncio.create_task(self._auto_reconnect())
 
     async def register(self) -> bool:
         """Register with SIP server."""
@@ -292,7 +363,7 @@ class SIPClient:
             f"Contact: {contact}",
             "Max-Forwards: 70",
             "Expires: 3600",  # 1 hour registration
-            f"User-Agent: HomeAssistant-BTicino/1.0",
+            f"User-Agent: VctLinphoneService/3.0.0",
         ]
 
         if auth:
@@ -650,15 +721,26 @@ class SIPClient:
                     await self._handle_message(message)
 
             except asyncio.CancelledError:
+                _LOGGER.debug("Receive loop cancelled")
                 break
             except Exception as e:
                 _LOGGER.error("Error in receive loop: %s", e)
                 import traceback
                 _LOGGER.debug(traceback.format_exc())
-                break
+                # Don't break on error, try to continue receiving
+                await asyncio.sleep(1)
+                continue
 
+        _LOGGER.warning("Receive loop exited, connection may have been closed by server")
         self._running = False
         self._registration_state = RegistrationState.UNREGISTERED
+
+        # Only try to reconnect if this wasn't an intentional disconnect
+        if not self._intentional_disconnect:
+            _LOGGER.info("Connection lost unexpectedly, will attempt auto-reconnect")
+            asyncio.create_task(self._auto_reconnect())
+        else:
+            _LOGGER.debug("Intentional disconnect, skipping auto-reconnect")
 
     async def _handle_message(self, message: str):
         """Handle a received SIP message."""
@@ -1050,6 +1132,7 @@ class SIPClient:
             local_tag=self._generate_tag(),
             cseq=1,
             devaddr=devaddr,
+            station_id=station_id,  # Store station_id for fixed port allocation
             media_mode=media_mode,
         )
 
@@ -1076,8 +1159,8 @@ class SIPClient:
                     # This is done here to avoid race conditions with receive loop
                     _LOGGER.info("Reconnecting for authenticated INVITE...")
 
-                    # Disconnect completely
-                    await self.disconnect()
+                    # Disconnect completely (intentional - don't trigger auto-reconnect)
+                    await self.disconnect(intentional=True)
                     await asyncio.sleep(0.3)
 
                     # Reconnect
@@ -1085,6 +1168,12 @@ class SIPClient:
                         _LOGGER.error("Failed to reconnect for authenticated INVITE")
                         call.state = CallState.DISCONNECTED
                         return None
+
+                    # After reconnect for 407 auth, we're implicitly registered
+                    # because the proxy accepted our previous registration
+                    # Set state to REGISTERED so is_registered returns True
+                    self._registration_state = RegistrationState.REGISTERED
+                    _LOGGER.debug("Set registration state to REGISTERED after 407 reconnect")
 
                     # Send authenticated INVITE
                     call.state = CallState.CALLING
@@ -1102,6 +1191,66 @@ class SIPClient:
             _LOGGER.error("Failed to initiate call: %s", e)
             call.state = CallState.DISCONNECTED
             return None
+
+    async def send_reinvite(self, call: SIPCall, new_media_mode: MediaMode) -> bool:
+        """Send a re-INVITE to modify the media session (add/remove audio).
+
+        This is used to add audio to an existing video-only call, or vice versa.
+        According to BTicino/Olinphone behavior, re-INVITE is the standard way
+        to modify an active session.
+
+        Args:
+            call: The active SIPCall to modify
+            new_media_mode: The new media mode to request
+
+        Returns:
+            True if re-INVITE was sent and accepted, False otherwise
+        """
+        if call.state != CallState.CONNECTED:
+            _LOGGER.error("Cannot send re-INVITE: call not connected (state=%s)", call.state)
+            return False
+
+        _LOGGER.info("Sending re-INVITE to change media from %s to %s",
+                    call.media_mode.value, new_media_mode.value)
+
+        # Update the media mode
+        old_mode = call.media_mode
+        call.media_mode = new_media_mode
+
+        # Increment CSeq for new transaction
+        call.cseq += 1
+
+        try:
+            # Build re-INVITE with authentication (we should already have auth from initial INVITE)
+            if self._proxy_nonce:
+                auth_header = self._build_proxy_auth_header(call.remote_uri, method="INVITE")
+                invite = self._build_invite_request_with_auth(call, auth_header)
+            else:
+                invite = self._build_invite_request(call)
+
+            await self._send(invite)
+            _LOGGER.info("Sent re-INVITE with new SDP")
+
+            # Wait for response (ACK will be sent automatically by _handle_invite_response)
+            # The call stays in CONNECTED state during re-INVITE
+            for _ in range(50):  # 5 second timeout
+                await asyncio.sleep(0.1)
+
+                # Check if we got audio port back from server
+                if new_media_mode in (MediaMode.AUDIO_VIDEO, MediaMode.AUDIO_ONLY):
+                    if call.remote_audio_port and call.audio_srtp_key_remote:
+                        _LOGGER.info("re-INVITE successful: got audio port %d", call.remote_audio_port)
+                        return True
+
+            _LOGGER.warning("re-INVITE timeout - no audio parameters received")
+            # Revert media mode on failure
+            call.media_mode = old_mode
+            return False
+
+        except Exception as e:
+            _LOGGER.error("re-INVITE failed: %s", e)
+            call.media_mode = old_mode
+            return False
 
     def _build_invite_request(self, call: SIPCall) -> str:
         """Build an INVITE request based on media mode."""
@@ -1127,7 +1276,7 @@ class SIPClient:
             f"CSeq: {call.cseq} INVITE",
             f"Contact: {contact}",
             "Max-Forwards: 70",
-            "User-Agent: HomeAssistant-BTicino/1.0",
+            "User-Agent: VctLinphoneService/3.0.0",
             "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, MESSAGE, NOTIFY",
             "Supported: replaces, outbound, 100rel",  # Match gateway capabilities
             "Content-Type: application/sdp",
@@ -1150,11 +1299,19 @@ class SIPClient:
 
         session_id = int(time.time())
 
+        # Use public IP for the connection address (c= line) where gateway sends media
+        # This is critical for NAT traversal - gateway needs to send to our public IP
+        # The local_ip is still used for SIP signaling (Via headers, etc.)
+        media_ip = self._config.public_ip if self._config.public_ip else self._config.local_ip
+
+        _LOGGER.debug("SDP media IP: %s (public_ip=%s, local_ip=%s)",
+                     media_ip, self._config.public_ip, self._config.local_ip)
+
         sdp_lines = [
             "v=0",
             f"o={self._config.username} {session_id} {session_id} IN IP4 {self._config.local_ip}",
             "s=BTicino Call",
-            f"c=IN IP4 {self._config.local_ip}",
+            f"c=IN IP4 {media_ip}",  # Gateway will send media to this IP
             "t=0 0",
             # Custom BTicino session-level attributes (MUST be before media lines)
             # For VDE (Video Door Entry), don't set TVCC - only TVCC cameras use TVCC:1
@@ -1164,32 +1321,26 @@ class SIPClient:
             # Including it in initial INVITE causes 486 Busy Here from gateway
         ]
 
-        # Add audio if needed
-        if call.media_mode in (MediaMode.AUDIO_ONLY, MediaMode.AUDIO_VIDEO):
-            local_audio_port = random.randint(30000, 40000)
-            call.audio_rtp_port = local_audio_port
-            audio_key = base64.b64encode(random.randbytes(30)).decode()
-
-            sdp_lines.extend([
-                # Audio media line with SRTP - sendrecv for bidirectional audio
-                f"m=audio {local_audio_port} RTP/SAVP 0 8 101",
-                f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{audio_key}",
-                "a=sendrecv",
-                "a=rtpmap:0 PCMU/8000",
-                "a=rtpmap:8 PCMA/8000",
-                "a=rtpmap:101 telephone-event/8000",
-            ])
-
-        # Add video if needed
+        # VIDEO ONLY - audio is not supported by the BTicino cloud gateway for third-party clients
+        # The gateway systematically rejects audio SDP offers with m=audio 0
         if call.media_mode in (MediaMode.VIDEO_ONLY, MediaMode.AUDIO_VIDEO):
-            local_video_port = random.randint(20000, 30000)
+            # Use fixed port for NAT traversal
+            local_video_port = FIXED_VIDEO_PORT
             call.video_rtp_port = local_video_port
-            video_key = base64.b64encode(random.randbytes(30)).decode()
+
+            # Generate SRTP key ONLY if not already set (for re-INVITE after 407)
+            if not call.video_srtp_key:
+                video_key_raw = random.randbytes(30)  # 16 bytes key + 14 bytes salt
+                call.video_srtp_key = video_key_raw
+                video_key_b64 = base64.b64encode(video_key_raw).decode()
+                _LOGGER.info("Generated NEW SRTP key for video: %d bytes", len(video_key_raw))
+            else:
+                video_key_b64 = base64.b64encode(call.video_srtp_key).decode()
+                _LOGGER.info("Reusing EXISTING SRTP key for video")
 
             sdp_lines.extend([
-                # Video media line with SRTP - recvonly to receive video from outdoor station
                 f"m=video {local_video_port} RTP/SAVP 96",
-                f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{video_key}",
+                f"a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:{video_key_b64}",
                 "a=recvonly",
                 "a=rtpmap:96 H264/90000",
                 "a=fmtp:96 profile-level-id=42e01f",
@@ -1312,7 +1463,7 @@ class SIPClient:
             f"CSeq: {call.cseq} INVITE",
             f"Contact: {contact}",
             "Max-Forwards: 70",
-            "User-Agent: HomeAssistant-BTicino/1.0",
+            "User-Agent: VctLinphoneService/3.0.0",
             "Allow: INVITE, ACK, CANCEL, BYE, OPTIONS, MESSAGE, NOTIFY",
             "Supported: replaces, outbound, 100rel",
             auth_header,
@@ -1352,39 +1503,99 @@ class SIPClient:
         return "\r\n".join(lines)
 
     def _parse_sdp_response(self, call: SIPCall, message: str):
-        """Parse SDP from 200 OK response to extract SRTP parameters."""
+        """Parse SDP from 200 OK response to extract remote SRTP parameters.
+
+        SRTP key exchange in SDP offer/answer (RFC 4568):
+        In practice, each party sends the key it will use to ENCRYPT data it sends.
+        - We send OUR key in INVITE → we would encrypt with OUR key (but we're recvonly)
+        - Server sends ITS key in 200 OK → server encrypts with ITS key
+
+        Since server is sendonly for video:
+        - Server SENDS video encrypted with ITS key (from 200 OK)
+        - We must DECRYPT using SERVER's key
+
+        For audio (sendrecv):
+        - Server SENDS audio encrypted with ITS key → we decrypt with server's key
+        - We SEND audio encrypted with OUR key → server decrypts with our key
+
+        This is different from some RFC interpretations but matches real-world
+        implementations like Olinphone/BTicino.
+        """
         # Find the SDP body (after blank line)
         parts = message.split("\r\n\r\n", 1)
         if len(parts) < 2:
+            _LOGGER.warning("No SDP body found in 200 OK response")
             return
 
         sdp = parts[1]
+        _LOGGER.debug("Parsing SDP response:\n%s", sdp)
 
-        # Look for video port and crypto line
+        remote_video_port = None
+        remote_audio_port = None
+        remote_ip = None
+        current_media = None  # Track which media section we're in
+
+        # Parse SDP line by line, tracking media sections
         for line in sdp.split("\r\n"):
             if line.startswith("m=video"):
+                current_media = "video"
                 parts = line.split()
                 if len(parts) >= 2:
                     try:
-                        call.video_rtp_port = int(parts[1])
+                        remote_video_port = int(parts[1])
+                        _LOGGER.debug("Remote video port: %d", remote_video_port)
+                    except ValueError:
+                        pass
+            elif line.startswith("m=audio"):
+                current_media = "audio"
+                parts = line.split()
+                if len(parts) >= 2:
+                    try:
+                        remote_audio_port = int(parts[1])
+                        call.remote_audio_port = remote_audio_port
+                        _LOGGER.debug("Remote audio port: %d", remote_audio_port)
                     except ValueError:
                         pass
             elif line.startswith("a=crypto:"):
-                # SRTP key exchange
-                # Format: a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:base64key
+                # SRTP key for current media section
                 crypto_match = re.search(r'inline:([A-Za-z0-9+/=]+)', line)
                 if crypto_match:
                     import base64
                     try:
-                        call.video_srtp_key = base64.b64decode(crypto_match.group(1))
-                        _LOGGER.debug("Extracted SRTP key for video")
+                        server_key = base64.b64decode(crypto_match.group(1))
+                        if current_media == "video":
+                            _LOGGER.info("Server VIDEO SRTP key: %d bytes, b64=%s...",
+                                        len(server_key), crypto_match.group(1)[:20])
+                            call.video_srtp_key = server_key
+                        elif current_media == "audio":
+                            _LOGGER.info("Server AUDIO SRTP key: %d bytes, b64=%s...",
+                                        len(server_key), crypto_match.group(1)[:20])
+                            # Server's key for DECRYPTING incoming audio from server
+                            call.audio_srtp_key_remote = server_key
                     except Exception as e:
-                        _LOGGER.warning("Failed to decode SRTP key: %s", e)
+                        _LOGGER.warning("Failed to decode server SRTP key: %s", e)
             elif line.startswith("c=IN IP4"):
                 # Connection address (remote IP)
                 parts = line.split()
                 if len(parts) >= 3:
-                    _LOGGER.debug("Remote video address: %s", parts[2])
+                    remote_ip = parts[2]
+                    call.remote_ip = remote_ip
+                    _LOGGER.debug("Remote address: %s", remote_ip)
+
+        # Log parsed info
+        video_key_b64 = ""
+        if call.video_srtp_key:
+            import base64
+            video_key_b64 = base64.b64encode(call.video_srtp_key).decode()[:20]
+
+        audio_key_b64 = ""
+        if call.audio_srtp_key_remote:
+            import base64
+            audio_key_b64 = base64.b64encode(call.audio_srtp_key_remote).decode()[:20]
+
+        _LOGGER.info("SDP parsed: remote=%s, video_port=%s (key=%s...), audio_port=%s (key=%s...)",
+                    remote_ip, remote_video_port, video_key_b64,
+                    remote_audio_port, audio_key_b64)
 
     async def hangup_call(self, call_id: str) -> bool:
         """Hangup a call by sending BYE."""

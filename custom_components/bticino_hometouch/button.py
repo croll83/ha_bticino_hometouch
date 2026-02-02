@@ -46,8 +46,7 @@ async def async_setup_entry(
     for station_id in range(1, coordinator.num_cameras + 1):
         entities.append(BticinoViewVideoButton(coordinator, entry, station_id))
 
-    # Add audio toggle button (for enabling audio on active video call)
-    entities.append(BticinoEnableAudioButton(coordinator, entry))
+    # Audio button removed - audio is not supported by BTicino gateway
 
     async_add_entities(entities)
 
@@ -183,7 +182,7 @@ class BticinoViewVideoButton(CoordinatorEntity, ButtonEntity):
         }
 
     async def async_press(self) -> None:
-        """Handle button press - initiate video-only call."""
+        """Handle button press - initiate video-only call (audio not supported)."""
         _LOGGER.info("Starting video call to station %d (%s)", self._station_id, self._station_name)
         success = await self.coordinator.async_initiate_call(
             self._station_id,
@@ -195,42 +194,5 @@ class BticinoViewVideoButton(CoordinatorEntity, ButtonEntity):
             _LOGGER.error("Failed to start video call to station %d", self._station_id)
 
 
-class BticinoEnableAudioButton(CoordinatorEntity, ButtonEntity):
-    """Button to enable bidirectional audio on an active video call."""
-
-    _attr_has_entity_name = True
-
-    def __init__(
-        self,
-        coordinator: BticinoCoordinator,
-        entry: ConfigEntry,
-    ) -> None:
-        """Initialize the button."""
-        super().__init__(coordinator)
-        self._attr_unique_id = f"{entry.entry_id}_enable_audio"
-        self._attr_name = "Enable Audio"
-        self._attr_icon = "mdi:microphone-plus"
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        """Return device info."""
-        return DeviceInfo(
-            identifiers={(DOMAIN, self.coordinator.entry.entry_id)},
-            name="BTicino Hometouch",
-            manufacturer="BTicino",
-            model="Door Entry Touch",
-        )
-
-    @property
-    def available(self) -> bool:
-        """Return True if there's an active video call."""
-        return self.coordinator.has_active_call
-
-    async def async_press(self) -> None:
-        """Handle button press - enable audio on active call."""
-        _LOGGER.info("Enabling audio on active call")
-        success = await self.coordinator.async_enable_audio()
-        if success:
-            _LOGGER.info("Audio enabled on active call")
-        else:
-            _LOGGER.error("Failed to enable audio")
+# BticinoEnableAudioButton removed - audio is not supported by BTicino gateway
+# The gateway systematically rejects audio SDP offers from non-Linphone clients

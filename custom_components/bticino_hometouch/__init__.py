@@ -2,13 +2,17 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from pathlib import Path
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.components.frontend import async_register_built_in_panel
+from homeassistant.components.http import StaticPathConfig
 
 from .const import (
     DOMAIN,
@@ -34,6 +38,10 @@ PLATFORMS: list[Platform] = [
 # Check certificate expiry daily
 CERT_CHECK_INTERVAL = timedelta(days=1)
 
+# Frontend card file
+CARD_FILE = "bticino-intercom-card.js"
+CARD_URL = f"/bticino_hometouch/{CARD_FILE}"
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up BTicino Hometouch from a config entry."""
@@ -44,10 +52,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
+    # Register frontend card
+    await _register_frontend_card(hass)
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     # Start SIP client
     await coordinator.async_start_sip()
+
+    # Register audio WebSocket endpoint
+    from .audio_websocket import setup_audio_websocket
+    setup_audio_websocket(hass, coordinator)
 
     # Schedule certificate renewal check
     async def check_certificate_renewal(now: datetime) -> None:
@@ -158,3 +173,63 @@ async def _check_and_renew_certificate(
 
     except Exception as err:
         _LOGGER.error("Failed to renew certificate: %s", err)
+
+
+async def _register_frontend_card(hass: HomeAssistant) -> None:
+    """Register the BTicino Intercom custom card."""
+    # Check if already registered
+    if DOMAIN in hass.data and "frontend_registered" in hass.data[DOMAIN]:
+        return
+
+    # Path to the www folder in this integration
+    www_path = Path(__file__).parent / "www"
+
+    if not www_path.exists():
+        _LOGGER.warning("Frontend www folder not found: %s", www_path)
+        return
+
+    card_file = www_path / CARD_FILE
+    if not card_file.exists():
+        _LOGGER.warning("Frontend card file not found: %s", card_file)
+        return
+
+    # Copy card to /config/www (this is the most reliable method)
+    dest_path = Path("/config/www") / CARD_FILE
+    try:
+        import shutil
+        import asyncio
+
+        def _copy_card():
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(card_file, dest_path)
+
+        # Use asyncio.to_thread to avoid blocking the event loop
+        await asyncio.to_thread(_copy_card)
+        _LOGGER.info("Installed BTicino Intercom card to %s", dest_path)
+    except Exception as e:
+        _LOGGER.warning("Could not copy card to /config/www: %s", e)
+        return
+
+    # The card is now available at /local/bticino-intercom-card.js
+    local_url = f"/local/{CARD_FILE}"
+
+    # Try to add to Lovelace resources automatically
+    try:
+        if "lovelace" in hass.data:
+            lovelace_data = hass.data["lovelace"]
+            if hasattr(lovelace_data, "resources"):
+                resources = lovelace_data.resources
+                # Check if resource already exists
+                existing = [r for r in resources.async_items() if CARD_FILE in r.get("url", "")]
+                if not existing:
+                    await resources.async_create_item({
+                        "url": local_url,
+                        "type": "module"
+                    })
+                    _LOGGER.info("Added BTicino Intercom card to Lovelace resources: %s", local_url)
+    except Exception as e:
+        _LOGGER.debug("Could not auto-add Lovelace resource (manual add may be needed): %s", e)
+
+    # Mark as registered
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN]["frontend_registered"] = True

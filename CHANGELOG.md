@@ -2,6 +2,92 @@
 
 Tutte le modifiche significative a questo progetto saranno documentate in questo file.
 
+## [3.0.0] - 2026-02-02
+
+### ⚠️ Breaking Changes
+- **Audio rimosso**: Dopo test approfonditi, la funzionalità audio è stata rimossa. Il gateway cloud BTicino (`sipserver.bs.iotleg.com`) rifiuta sistematicamente le offerte SDP audio da client non-Linphone.
+
+### Modificato
+- Le chiamate video ora usano solo `VIDEO_ONLY` invece di `AUDIO_VIDEO`
+- Card custom semplificata - rimosso pulsante mic e controlli audio
+- La card mostra "Solo video (audio non disponibile)" nel popup
+
+### Aggiunto
+- **Banner chiamata in arrivo**: Banner arancione pulsante quando qualcuno suona al citofono
+- README aggiornato con sezione limitazioni in evidenza
+
+### Rimosso
+- Entity `BticinoEnableAudioButton`
+- Funzionalità microfono dalla card custom
+- Codice G.711 A-law encoder/decoder dalla card
+
+---
+
+## Investigazione Audio - Riassunto Completo
+
+### Il Problema
+Volevamo implementare audio bidirezionale (sentire il citofono e parlare) in Home Assistant, come fa l'app ufficiale BTicino Door Entry Touch.
+
+### Cosa Abbiamo Provato
+
+#### 1. Approccio Iniziale - SDP con Audio
+Aggiunto `m=audio` all'SDP con varie configurazioni:
+- Codec OPUS (payload type 98) - stesso dell'app ufficiale
+- PCMA/PCMU (G.711 a-law/mu-law)
+- Vari sample rate (8kHz, 48kHz)
+- Direzione `sendrecv` per audio bidirezionale
+
+**Risultato**: Il gateway ha sempre risposto con `m=audio 0` (porta 0 = rifiutato)
+
+#### 2. Analisi PCAP
+Catturato traffico di rete dall'app ufficiale con PCAPdroid:
+- Scoperto che l'app usa porte 7076 (audio) e 9078 (video)
+- Traffico audio bidirezionale (895 pacchetti inviati, 864 ricevuti)
+- L'app usa codec OPUS con crittografia SRTP
+
+#### 3. Decompilazione APK
+Decompilato l'APK BTicino Door Entry Touch:
+- Trovato config `linphonerc_factory` con assegnazione porte
+- Scoperto `MediaEncryption = 1` (SRTP)
+- L'app imposta `setAudioDirection(MediaDirection.SendRecv)` per chiamate VDE
+- Le telecamere TVCC disabilitano esplicitamente l'audio con `MediaDirection.Inactive`
+
+#### 4. Variazioni SDP Testate
+
+| Configurazione | Risultato |
+|---------------|-----------|
+| OPUS + PCMA + PCMU | `m=audio 0` |
+| Solo PCMA | `m=audio 0` |
+| RTP plain (senza SRTP) | `m=audio 0` |
+| Porte diverse (7076 vs dinamiche) | `m=audio 0` |
+| Con/senza `a=rtcp:` | `m=audio 0` |
+| Con/senza `b=AS:` bandwidth | `m=audio 0` |
+| Audio prima del video in SDP | `m=audio 0` |
+| Audio dopo il video in SDP | `m=audio 0` |
+
+#### 5. Analisi User-Agent
+Verificato che il nostro User-Agent corrisponde all'app ufficiale: `VctLinphoneService/3.0.0`
+
+### Causa Principale
+Il gateway cloud BTicino (server Flexisip) sembra avere restrizioni lato server che accettano audio solo da:
+1. Client che usano l'SDK Linphone reale (libreria nativa)
+2. Client che completano qualche handshake o autenticazione non documentata
+
+Il signaling SIP funziona correttamente (otteniamo 200 OK per il video), ma l'audio viene sistematicamente rifiutato indipendentemente dal formato SDP. Questa è probabilmente una restrizione intenzionale di BTicino/Legrand.
+
+### Conclusione
+L'audio non può essere implementato senza:
+1. Usare l'SDK Linphone reale (che richiederebbe compilare codice nativo)
+2. Che BTicino/Legrand modifichi le policy lato server
+3. Reverse-engineering di protocolli proprietari aggiuntivi
+
+L'integrazione ora si concentra su ciò che funziona:
+- Streaming video (con ~8s di latenza per transcoding SRTP→HLS)
+- Sblocco porta (funziona perfettamente)
+- Notifiche chiamata in arrivo (solo banner)
+
+---
+
 ## [2.2.0] - 2026-02-01
 
 ### Aggiunto

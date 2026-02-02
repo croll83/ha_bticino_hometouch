@@ -40,10 +40,12 @@
         "data": {
           "num_cameras": "Number of Outdoor Stations",
           "num_locks": "Number of Locks",
-          "gateway_address": "Gateway Local IP Address (optional)"
+          "gateway_address": "Gateway Local IP Address (optional)",
+          "public_ip": "Public IP Address (for video streaming)"
         },
         "data_description": {
-          "gateway_address": "Local IP address of your gateway, if known"
+          "gateway_address": "Local IP address of your gateway, if known",
+          "public_ip": "Your public IP address for video NAT traversal. Leave empty to auto-detect. Required if you have port forwarding configured (ports 21001-21010 and 22001-22010)."
         }
       }
     }

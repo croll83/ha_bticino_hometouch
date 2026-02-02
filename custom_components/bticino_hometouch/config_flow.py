@@ -42,6 +42,7 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_CERT_EXPIRY,
     CONF_LOCK_COMMANDS,
+    CONF_PUBLIC_IP,
     DEFAULT_SIP_SERVER,
     DEFAULT_SIP_PORT,
     DEFAULT_NUM_CAMERAS,
@@ -210,12 +211,12 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         if user_input is not None:
             # Update config entry data
             new_data = {**self.config_entry.data}
-            new_data[CONF_NUM_CAMERAS] = user_input[CONF_NUM_CAMERAS]
-            new_data[CONF_NUM_LOCKS] = user_input[CONF_NUM_LOCKS]
+            new_data[CONF_NUM_CAMERAS] = int(user_input[CONF_NUM_CAMERAS])
+            new_data[CONF_NUM_LOCKS] = int(user_input[CONF_NUM_LOCKS])
 
             # Adjust lock commands array size
             current_commands = new_data.get(CONF_LOCK_COMMANDS, [])
-            new_num_locks = user_input[CONF_NUM_LOCKS]
+            new_num_locks = int(user_input[CONF_NUM_LOCKS])
             if len(current_commands) < new_num_locks:
                 # Extend with type A
                 current_commands.extend(
@@ -229,6 +230,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             # Update gateway address if provided
             if user_input.get(CONF_GATEWAY_ADDRESS):
                 new_data[CONF_GATEWAY_ADDRESS] = user_input[CONF_GATEWAY_ADDRESS]
+
+            # Update public IP for NAT traversal
+            new_data[CONF_PUBLIC_IP] = user_input.get(CONF_PUBLIC_IP, "")
 
             self.hass.config_entries.async_update_entry(
                 self.config_entry, data=new_data
@@ -260,8 +264,22 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         CONF_GATEWAY_ADDRESS,
                         default=self.config_entry.data.get(CONF_GATEWAY_ADDRESS, ""),
                     ): TextSelector(),
+                    vol.Optional(
+                        CONF_PUBLIC_IP,
+                        default=self.config_entry.data.get(CONF_PUBLIC_IP, ""),
+                        description={
+                            "suggested_value": self.config_entry.data.get(CONF_PUBLIC_IP, "")
+                        },
+                    ): TextSelector(
+                        TextSelectorConfig(
+                            type=TextSelectorType.TEXT,
+                        )
+                    ),
                 }
             ),
+            description_placeholders={
+                "public_ip_hint": "Your public IP address for video streaming (required for NAT traversal). Leave empty to auto-detect.",
+            },
         )
 
 
