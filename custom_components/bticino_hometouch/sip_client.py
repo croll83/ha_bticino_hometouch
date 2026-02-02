@@ -1110,13 +1110,14 @@ class SIPClient:
         #   Result: "20", "21", "26"
         #
         # From plantSQLite database - VDE devices have deviceDev=2:
-        #   - Albani (station 1) = deviceDev "2" + deviceAddr "0" → DEVADDR "20"
-        #   - Madruzzo (station 2) = deviceDev "2" + deviceAddr "1" → DEVADDR "21"
-        #   - Scala B (station 3) = deviceDev "2" + deviceAddr "6" → DEVADDR "26"
+        #   - Station 1 = deviceDev "2" + deviceAddr "0" → DEVADDR "20"
+        #   - Station 2 = deviceDev "2" + deviceAddr "1" → DEVADDR "21"
+        #   - Station 3 = deviceDev "2" + deviceAddr "6" → DEVADDR "26"
+        # Note: Station 3 uses deviceAddr "6" not "2" - this mapping may be plant-specific
         STATION_TO_DEVADDR = {
-            1: "20",   # Albani - deviceDev "2" + deviceAddr "0"
-            2: "21",   # Madruzzo - deviceDev "2" + deviceAddr "1"
-            3: "26",   # Scala B - deviceDev "2" + deviceAddr "6"
+            1: "20",   # deviceDev "2" + deviceAddr "0"
+            2: "21",   # deviceDev "2" + deviceAddr "1"
+            3: "26",   # deviceDev "2" + deviceAddr "6"
         }
 
         devaddr = STATION_TO_DEVADDR.get(station_id, f"2{station_id - 1}")

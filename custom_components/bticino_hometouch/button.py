@@ -17,12 +17,6 @@ from .sip_client import MediaMode
 
 _LOGGER = logging.getLogger(__name__)
 
-# Station names mapping (can be configured via options later)
-STATION_NAMES = {
-    1: "Albani",
-    2: "Madruzzo",
-    3: "Scala B",
-}
 
 
 async def async_setup_entry(
@@ -65,7 +59,6 @@ class BticinoDoorLockButton(CoordinatorEntity, ButtonEntity):
         """Initialize the button."""
         super().__init__(coordinator)
         self._lock_id = lock_id
-        self._station_name = STATION_NAMES.get(lock_id, f"Door {lock_id}")
         self._attr_unique_id = f"{entry.entry_id}_lock_{lock_id}"
         self._attr_name = f"Unlock Door {lock_id}"
         self._attr_icon = "mdi:door-open"
@@ -86,12 +79,11 @@ class BticinoDoorLockButton(CoordinatorEntity, ButtonEntity):
         """Return extra state attributes."""
         return {
             "lock_id": self._lock_id,
-            "station_name": self._station_name,
         }
 
     async def async_press(self) -> None:
         """Handle button press."""
-        _LOGGER.info("Unlocking door %d (%s)", self._lock_id, self._station_name)
+        _LOGGER.info("Unlocking door %d", self._lock_id)
         success = await self.coordinator.async_unlock_door(self._lock_id)
         if not success:
             _LOGGER.error("Failed to unlock door %d", self._lock_id)
@@ -150,7 +142,6 @@ class BticinoViewVideoButton(CoordinatorEntity, ButtonEntity):
         """Initialize the button."""
         super().__init__(coordinator)
         self._station_id = station_id
-        self._station_name = STATION_NAMES.get(station_id, f"Station {station_id}")
         self._attr_unique_id = f"{entry.entry_id}_view_video_{station_id}"
         self._attr_name = f"View Video Station {station_id}"
         self._attr_icon = "mdi:doorbell-video"
@@ -173,17 +164,13 @@ class BticinoViewVideoButton(CoordinatorEntity, ButtonEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
-        rtsp_url = self.coordinator.get_rtsp_url(self._station_id)
         return {
             "station_id": self._station_id,
-            "station_name": self._station_name,
-            "rtsp_url": rtsp_url,
-            "stream_url": f"rtsp://a889bffc-go2rtc:8554/bticino_camera_{self._station_id}",
         }
 
     async def async_press(self) -> None:
         """Handle button press - initiate video-only call (audio not supported)."""
-        _LOGGER.info("Starting video call to station %d (%s)", self._station_id, self._station_name)
+        _LOGGER.info("Starting video call to station %d", self._station_id)
         success = await self.coordinator.async_initiate_call(
             self._station_id,
             MediaMode.VIDEO_ONLY
