@@ -1,5 +1,5 @@
 /**
- * BTicino Intercom Card v3.0
+ * BTicino Intercom Card v3.2
  *
  * A compact Lovelace card for BTicino Door Entry intercom.
  * Displays all outdoor stations in a horizontal layout with video popup.
@@ -9,7 +9,7 @@
  * - Video popup with HLS streaming
  * - Door unlock with visual feedback
  * - Incoming call banner notification
- * - Play/pause controls
+ * - Graceful "Stream Ended" message when call terminates
  *
  * Limitations:
  * - Audio is NOT supported (BTicino cloud gateway limitation)
@@ -50,6 +50,22 @@ class BticinoIntercomCard extends HTMLElement {
     this._popupOpen = false;
     this._unlockSubscription = null;
     this._incomingCallSubscription = null;
+  }
+
+  // Entity ID patterns - all BTicino Hometouch entities use this prefix
+  static get ENTITY_PREFIX() { return 'bticino_hometouch_'; }
+
+  // Get entity IDs directly by pattern - no ambiguity with other integrations
+  _getViewVideoButton(stationId) {
+    return `button.${BticinoIntercomCard.ENTITY_PREFIX}view_video_station_${stationId}`;
+  }
+
+  _getUnlockDoorButton(stationId) {
+    return `button.${BticinoIntercomCard.ENTITY_PREFIX}unlock_door_${stationId}`;
+  }
+
+  _getHangupButton() {
+    return `button.${BticinoIntercomCard.ENTITY_PREFIX}hangup_call`;
   }
 
   connectedCallback() {
@@ -144,20 +160,23 @@ class BticinoIntercomCard extends HTMLElement {
     if (!this._hass) return [];
 
     const stations = [];
+    const prefix = `camera.${BticinoIntercomCard.ENTITY_PREFIX}camera_`;
+
+    // Find BTicino Hometouch camera entities by their fixed entity_id pattern
+    // Pattern: camera.bticino_hometouch_camera_N
     const cameraEntities = Object.keys(this._hass.states)
-      .filter(e => e.startsWith("camera.bticino_"))
+      .filter(e => e.startsWith(prefix))
       .sort();
 
     for (const entityId of cameraEntities) {
       const state = this._hass.states[entityId];
-      const stationId = state.attributes.station_id;
-      const stationName = state.attributes.station_name ||
-                          state.attributes.friendly_name ||
-                          entityId.replace("camera.bticino_", "").replace(/_/g, " ");
+      // Extract station ID from entity_id (e.g., camera.bticino_hometouch_camera_1 -> 1)
+      const stationId = parseInt(entityId.replace(prefix, '')) || 1;
+      const stationName = state.attributes.friendly_name || `Station ${stationId}`;
 
       stations.push({
         entityId,
-        stationId: stationId || stations.length + 1,
+        stationId: stationId,
         name: stationName,
         state: state,
         isRinging: state.attributes.is_ringing,
@@ -668,7 +687,14 @@ class BticinoIntercomCard extends HTMLElement {
     if (loading) loading.style.display = 'flex';
     if (loadingStatus) loadingStatus.textContent = 'Avvio chiamata video...';
 
-    const buttonEntity = `button.citofono_view_video_station_${stationId}`;
+    // Find the view video button dynamically
+    const buttonEntity = this._getViewVideoButton(stationId);
+    if (!buttonEntity) {
+      console.error('View video button not found for station', stationId);
+      if (loadingStatus) loadingStatus.textContent = 'Button non trovato';
+      return;
+    }
+
     try {
       if (loadingStatus) loadingStatus.textContent = 'Connessione al posto esterno...';
       await this._hass.callService('button', 'press', { entity_id: buttonEntity });
@@ -806,15 +832,36 @@ class BticinoIntercomCard extends HTMLElement {
         });
 
         this._hlsPlayer.on(Hls.Events.ERROR, (event, data) => {
+          console.log('HLS error:', data.type, data.details, 'fatal:', data.fatal, 'streamStarted:', this._streamStarted);
+
           if (data.fatal) {
             switch (data.type) {
               case Hls.ErrorTypes.NETWORK_ERROR:
+                // Check if stream was playing and now we get 404 errors (stream ended)
+                // This happens when gateway closes the call and HLS files are deleted
+                if (this._streamStarted) {
+                  // Any fatal network error after stream started = stream terminated
+                  console.log('Stream was active, showing stream ended message');
+                  this._showStreamEnded();
+                  return;
+                }
+                // Not started yet, try to recover
+                console.log('Stream not started yet, trying to recover...');
                 this._hlsPlayer.startLoad();
                 break;
               case Hls.ErrorTypes.MEDIA_ERROR:
                 this._hlsPlayer.recoverMediaError();
                 break;
             }
+          }
+        });
+
+        // Track when stream actually starts playing - use multiple events to be sure
+        this._streamStarted = false;
+        this._hlsPlayer.on(Hls.Events.FRAG_LOADED, () => {
+          if (!this._streamStarted) {
+            console.log('Stream started (FRAG_LOADED)');
+            this._streamStarted = true;
           }
         });
 
@@ -835,6 +882,8 @@ class BticinoIntercomCard extends HTMLElement {
   }
 
   _stopStream() {
+    this._streamStarted = false;
+
     if (this._hlsPlayer) {
       this._hlsPlayer.destroy();
       this._hlsPlayer = null;
@@ -846,6 +895,27 @@ class BticinoIntercomCard extends HTMLElement {
       video.src = '';
       video.load();
       video.style.display = 'none';
+    }
+  }
+
+  _showStreamEnded() {
+    // Stream was terminated by gateway (timeout or hangup)
+    this._stopStream();
+
+    const placeholder = this.querySelector('#placeholder');
+    const loading = this.querySelector('#loading');
+    const bufferingOverlay = this.querySelector('#buffering-overlay');
+
+    if (bufferingOverlay) bufferingOverlay.classList.remove('visible');
+    if (loading) loading.style.display = 'none';
+
+    if (placeholder) {
+      placeholder.innerHTML = `
+        <ha-icon icon="mdi:video-off" style="color: var(--warning-color, #ff9800);"></ha-icon>
+        <span style="margin-top: 8px; font-weight: 500;">Flusso Terminato</span>
+        <span style="font-size: 0.85em; margin-top: 8px; color: #888;">La chiamata è stata chiusa</span>
+      `;
+      placeholder.style.display = 'flex';
     }
   }
 
@@ -867,12 +937,15 @@ class BticinoIntercomCard extends HTMLElement {
   }
 
   async _hangupAndClose() {
-    try {
-      await this._hass.callService('button', 'press', {
-        entity_id: 'button.citofono_hangup_call'
-      });
-    } catch (e) {
-      console.error('Failed to hangup:', e);
+    const hangupButton = this._getHangupButton();
+    if (hangupButton) {
+      try {
+        await this._hass.callService('button', 'press', {
+          entity_id: hangupButton
+        });
+      } catch (e) {
+        console.error('Failed to hangup:', e);
+      }
     }
     this._closePopup();
   }
@@ -881,9 +954,18 @@ class BticinoIntercomCard extends HTMLElement {
     btn.classList.add('waiting');
     btn.classList.remove('success', 'error');
 
+    const unlockButton = this._getUnlockDoorButton(stationId);
+    if (!unlockButton) {
+      console.error('Unlock button not found for station', stationId);
+      btn.classList.remove('waiting');
+      btn.classList.add('error');
+      setTimeout(() => btn.classList.remove('error'), 5000);
+      return;
+    }
+
     try {
       await this._hass.callService('button', 'press', {
-        entity_id: `button.citofono_unlock_door_${stationId}`
+        entity_id: unlockButton
       });
 
       setTimeout(() => {
@@ -981,7 +1063,7 @@ window.customCards.push({
 });
 
 console.info(
-  '%c BTICINO-INTERCOM-CARD %c v3.0.0 ',
+  '%c BTICINO-INTERCOM-CARD %c v3.2.1 ',
   'color: white; background: #03a9f4; font-weight: bold;',
   'color: #03a9f4; background: white; font-weight: bold;'
 );

@@ -1,5 +1,5 @@
 /**
- * BTicino Intercom Card v3.1
+ * BTicino Intercom Card v3.2
  *
  * A compact Lovelace card for BTicino Door Entry intercom.
  * Displays all outdoor stations in a horizontal layout with video popup.
@@ -50,6 +50,22 @@ class BticinoIntercomCard extends HTMLElement {
     this._popupOpen = false;
     this._unlockSubscription = null;
     this._incomingCallSubscription = null;
+  }
+
+  // Entity ID patterns - all BTicino Hometouch entities use this prefix
+  static get ENTITY_PREFIX() { return 'bticino_hometouch_'; }
+
+  // Get entity IDs directly by pattern - no ambiguity with other integrations
+  _getViewVideoButton(stationId) {
+    return `button.${BticinoIntercomCard.ENTITY_PREFIX}view_video_station_${stationId}`;
+  }
+
+  _getUnlockDoorButton(stationId) {
+    return `button.${BticinoIntercomCard.ENTITY_PREFIX}unlock_door_${stationId}`;
+  }
+
+  _getHangupButton() {
+    return `button.${BticinoIntercomCard.ENTITY_PREFIX}hangup_call`;
   }
 
   connectedCallback() {
@@ -144,20 +160,23 @@ class BticinoIntercomCard extends HTMLElement {
     if (!this._hass) return [];
 
     const stations = [];
+    const prefix = `camera.${BticinoIntercomCard.ENTITY_PREFIX}camera_`;
+
+    // Find BTicino Hometouch camera entities by their fixed entity_id pattern
+    // Pattern: camera.bticino_hometouch_camera_N
     const cameraEntities = Object.keys(this._hass.states)
-      .filter(e => e.startsWith("camera.bticino_"))
+      .filter(e => e.startsWith(prefix))
       .sort();
 
     for (const entityId of cameraEntities) {
       const state = this._hass.states[entityId];
-      const stationId = state.attributes.station_id;
-      const stationName = state.attributes.station_name ||
-                          state.attributes.friendly_name ||
-                          entityId.replace("camera.bticino_", "").replace(/_/g, " ");
+      // Extract station ID from entity_id (e.g., camera.bticino_hometouch_camera_1 -> 1)
+      const stationId = parseInt(entityId.replace(prefix, '')) || 1;
+      const stationName = state.attributes.friendly_name || `Station ${stationId}`;
 
       stations.push({
         entityId,
-        stationId: stationId || stations.length + 1,
+        stationId: stationId,
         name: stationName,
         state: state,
         isRinging: state.attributes.is_ringing,
@@ -668,7 +687,14 @@ class BticinoIntercomCard extends HTMLElement {
     if (loading) loading.style.display = 'flex';
     if (loadingStatus) loadingStatus.textContent = 'Avvio chiamata video...';
 
-    const buttonEntity = `button.citofono_view_video_station_${stationId}`;
+    // Find the view video button dynamically
+    const buttonEntity = this._getViewVideoButton(stationId);
+    if (!buttonEntity) {
+      console.error('View video button not found for station', stationId);
+      if (loadingStatus) loadingStatus.textContent = 'Button non trovato';
+      return;
+    }
+
     try {
       if (loadingStatus) loadingStatus.textContent = 'Connessione al posto esterno...';
       await this._hass.callService('button', 'press', { entity_id: buttonEntity });
@@ -911,12 +937,15 @@ class BticinoIntercomCard extends HTMLElement {
   }
 
   async _hangupAndClose() {
-    try {
-      await this._hass.callService('button', 'press', {
-        entity_id: 'button.citofono_hangup_call'
-      });
-    } catch (e) {
-      console.error('Failed to hangup:', e);
+    const hangupButton = this._getHangupButton();
+    if (hangupButton) {
+      try {
+        await this._hass.callService('button', 'press', {
+          entity_id: hangupButton
+        });
+      } catch (e) {
+        console.error('Failed to hangup:', e);
+      }
     }
     this._closePopup();
   }
@@ -925,9 +954,18 @@ class BticinoIntercomCard extends HTMLElement {
     btn.classList.add('waiting');
     btn.classList.remove('success', 'error');
 
+    const unlockButton = this._getUnlockDoorButton(stationId);
+    if (!unlockButton) {
+      console.error('Unlock button not found for station', stationId);
+      btn.classList.remove('waiting');
+      btn.classList.add('error');
+      setTimeout(() => btn.classList.remove('error'), 5000);
+      return;
+    }
+
     try {
       await this._hass.callService('button', 'press', {
-        entity_id: `button.citofono_unlock_door_${stationId}`
+        entity_id: unlockButton
       });
 
       setTimeout(() => {
@@ -1025,7 +1063,7 @@ window.customCards.push({
 });
 
 console.info(
-  '%c BTICINO-INTERCOM-CARD %c v3.1.1 ',
+  '%c BTICINO-INTERCOM-CARD %c v3.2.1 ',
   'color: white; background: #03a9f4; font-weight: bold;',
   'color: #03a9f4; background: white; font-weight: bold;'
 );
