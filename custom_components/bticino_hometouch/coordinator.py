@@ -86,10 +86,13 @@ class BticinoCoordinator(DataUpdateCoordinator):
             i: None for i in range(1, self._num_cameras + 1)
         }
 
-        # HLS availability for each station (updated asynchronously)
-        self._hls_available: dict[int, bool] = {
+        # Stream availability for each station (HLS or WebRTC, updated asynchronously)
+        self._stream_available: dict[int, bool] = {
             i: False for i in range(1, self._num_cameras + 1)
         }
+
+        # Legacy alias for backwards compatibility
+        self._hls_available = self._stream_available
 
         # Audio handler for bidirectional audio
         self._audio_handler = None
@@ -101,8 +104,27 @@ class BticinoCoordinator(DataUpdateCoordinator):
         if self._current_call:
             call_state = self._current_call.state.value
 
+        # Check connection health
+        sip_healthy = False
+        sip_registered = False
+        connection_age = 0.0
+
+        if self._sip_client:
+            sip_registered = self._sip_client.is_registered
+            sip_healthy = self._sip_client.is_healthy
+            connection_age = self._sip_client.connection_age
+
+            # Log warning if registered but not healthy (connection may be stale)
+            if sip_registered and not sip_healthy:
+                _LOGGER.warning(
+                    "SIP registered but connection unhealthy (no data for %.0f seconds)",
+                    connection_age
+                )
+
         return {
-            "registered": self._sip_client.is_registered if self._sip_client else False,
+            "registered": sip_registered,
+            "healthy": sip_healthy,
+            "connection_age": connection_age,
             "active_call": self._current_call is not None,
             "call_state": call_state,
             "active_camera": self._active_camera,
@@ -270,6 +292,14 @@ class BticinoCoordinator(DataUpdateCoordinator):
             # Save active camera before resetting for teardown
             camera_to_teardown = self._active_camera
 
+            # Check if call was ever connected (had video stream)
+            # If not connected, this is a failed call attempt (e.g., 486 Busy)
+            # and we shouldn't fire call_ended event
+            was_connected = camera_to_teardown and camera_to_teardown in [
+                s for s, state in self._station_states.items()
+                if state == IntercomState.CONNECTED
+            ]
+
             # Reset all states
             for sid in self._station_states:
                 self._station_states[sid] = IntercomState.IDLE
@@ -281,13 +311,16 @@ class BticinoCoordinator(DataUpdateCoordinator):
             if camera_to_teardown:
                 self.hass.async_create_task(self._teardown_video_stream_for_camera(camera_to_teardown))
 
-            # Fire event
-            self.hass.bus.async_fire(
-                EVENT_CALL_ENDED,
-                {
-                    "call_id": call.call_id,
-                },
-            )
+            # Fire event with station_id for frontend ONLY if call was connected
+            # Don't fire for failed call attempts (486, timeout, etc.)
+            if was_connected:
+                self.hass.bus.async_fire(
+                    EVENT_CALL_ENDED,
+                    {
+                        "call_id": call.call_id,
+                        "station_id": camera_to_teardown,
+                    },
+                )
 
         # Trigger update
         self.async_set_updated_data(self.data)
@@ -308,11 +341,14 @@ class BticinoCoordinator(DataUpdateCoordinator):
 
         try:
             # Extract SRTP parameters from SDP in the call
+            # video_srtp_key should be the SERVER's key (for decrypting incoming video)
             srtp_port = call.video_rtp_port
             srtp_key = call.video_srtp_key
 
-            _LOGGER.info("Setting up video stream: port=%s, key=%s bytes",
-                        srtp_port, len(srtp_key) if srtp_key else 0)
+            import base64
+            key_b64 = base64.b64encode(srtp_key).decode()[:20] if srtp_key else "none"
+            _LOGGER.info("Setting up video stream: port=%s, key=%s bytes (b64=%s...)",
+                        srtp_port, len(srtp_key) if srtp_key else 0, key_b64)
 
             if srtp_port and srtp_key:
                 rtsp_url = await self._media_proxy.setup_camera_stream(
@@ -336,67 +372,83 @@ class BticinoCoordinator(DataUpdateCoordinator):
             import traceback
             _LOGGER.debug(traceback.format_exc())
 
-    async def _wait_for_hls_and_notify(self, camera_id: int, timeout: float = 15.0):
-        """Wait for HLS file to be created and then force state update.
+    async def _wait_for_stream_and_notify(self, camera_id: int, timeout: float = 15.0):
+        """Wait for stream to be ready and then force state update.
+
+        In WebRTC mode: Checks go2rtc for active producers.
+        In HLS mode: Checks for HLS file creation.
 
         This ensures the camera entity's extra_state_attributes reflect
-        hls_available=true after ffmpeg creates the HLS playlist.
+        stream availability after the stream is ready.
         """
+        webrtc_mode = self.is_webrtc_mode()
+        _LOGGER.info("Waiting for stream (webrtc_mode=%s, camera=%d, timeout=%ds)",
+                    webrtc_mode, camera_id, timeout)
+
+        start_time = asyncio.get_event_loop().time()
+        check_interval = 0.5  # Check every 500ms
+
+        while (asyncio.get_event_loop().time() - start_time) < timeout:
+            try:
+                if webrtc_mode:
+                    # WebRTC mode: check go2rtc for active stream
+                    is_ready = await self._media_proxy.is_stream_active(camera_id)
+                else:
+                    # HLS mode: check filesystem
+                    is_ready = await asyncio.to_thread(self._check_hls_ready, camera_id)
+
+                if is_ready:
+                    mode_str = "WebRTC" if webrtc_mode else "HLS"
+                    _LOGGER.info("%s stream ready for camera %d", mode_str, camera_id)
+                    # Update stream availability state
+                    self._stream_available[camera_id] = True
+                    # Force entity state update
+                    self.async_set_updated_data(self.data)
+                    return
+            except Exception as e:
+                _LOGGER.debug("Error checking stream: %s", e)
+
+            await asyncio.sleep(check_interval)
+
+        _LOGGER.warning("Timeout waiting for stream for camera %d", camera_id)
+
+    def _check_hls_ready(self, camera_id: int) -> bool:
+        """Check if HLS is ready (m3u8 exists and has segments)."""
         import os
         hls_dir = "/config/www/bticino"
         m3u8_file = f"bticino_camera_{camera_id}.m3u8"
         segment_prefix = f"bticino_camera_{camera_id}_"
 
-        _LOGGER.info("Waiting for HLS file: %s/%s (timeout=%ds)", hls_dir, m3u8_file, timeout)
-
-        start_time = asyncio.get_event_loop().time()
-        check_interval = 0.5  # Check every 500ms
-
-        def check_hls_ready():
-            """Check if HLS is ready (m3u8 exists and has segments)."""
-            m3u8_path = os.path.join(hls_dir, m3u8_file)
-            if not os.path.exists(m3u8_path):
-                return False
-            # Check if any .ts segment files exist
-            try:
-                for entry in os.scandir(hls_dir):
-                    if entry.name.startswith(segment_prefix) and entry.name.endswith('.ts'):
-                        return True
-            except Exception:
-                pass
+        m3u8_path = os.path.join(hls_dir, m3u8_file)
+        if not os.path.exists(m3u8_path):
             return False
+        # Check if any .ts segment files exist
+        try:
+            for entry in os.scandir(hls_dir):
+                if entry.name.startswith(segment_prefix) and entry.name.endswith('.ts'):
+                    return True
+        except Exception:
+            pass
+        return False
 
-        while (asyncio.get_event_loop().time() - start_time) < timeout:
-            try:
-                # Run filesystem check in executor to avoid blocking
-                is_ready = await asyncio.to_thread(check_hls_ready)
-                if is_ready:
-                    _LOGGER.info("HLS file ready for camera %d", camera_id)
-                    # Update HLS availability state
-                    self._hls_available[camera_id] = True
-                    # Force entity state update so frontend sees hls_available=true
-                    self.async_set_updated_data(self.data)
-                    return
-            except Exception as e:
-                _LOGGER.debug("Error checking HLS file: %s", e)
-
-            await asyncio.sleep(check_interval)
-
-        _LOGGER.warning("Timeout waiting for HLS file for camera %d", camera_id)
+    # Backwards compatibility alias
+    async def _wait_for_hls_and_notify(self, camera_id: int, timeout: float = 15.0):
+        """Alias for _wait_for_stream_and_notify (backwards compatibility)."""
+        await self._wait_for_stream_and_notify(camera_id, timeout)
 
     async def _teardown_video_stream(self):
         """Teardown video stream for the currently active camera."""
         if self._media_proxy and self._active_camera:
-            await self._media_proxy.teardown_stream(f"bticino_camera_{self._active_camera}")
-            # Mark HLS as unavailable
-            self._hls_available[self._active_camera] = False
+            await self._media_proxy.teardown_stream(f"bticino_live_{self._active_camera}")
+            # Mark stream as unavailable
+            self._stream_available[self._active_camera] = False
 
     async def _teardown_video_stream_for_camera(self, camera_id: int):
         """Teardown video stream for a specific camera."""
         if self._media_proxy:
-            await self._media_proxy.teardown_stream(f"bticino_camera_{camera_id}")
-            # Mark HLS as unavailable
-            self._hls_available[camera_id] = False
+            await self._media_proxy.teardown_stream(f"bticino_live_{camera_id}")
+            # Mark stream as unavailable
+            self._stream_available[camera_id] = False
 
     async def _send_notification(self, call: SIPCall, station_id: int):
         """Send push notification via Home Assistant companion app."""
@@ -450,9 +502,20 @@ class BticinoCoordinator(DataUpdateCoordinator):
 
     async def async_unlock_door(self, lock_id: int) -> bool:
         """Unlock a door."""
-        if not self._sip_client or not self._sip_client.is_registered:
-            _LOGGER.error("SIP client not registered")
+        if not self._sip_client:
+            _LOGGER.error("SIP client not initialized")
             return False
+
+        # Check if connection is healthy, not just registered
+        if not self._sip_client.is_healthy:
+            _LOGGER.warning(
+                "SIP connection unhealthy (registered=%s, connected=%s, age=%.0fs). "
+                "Attempting command anyway...",
+                self._sip_client.is_registered,
+                self._sip_client.is_connected,
+                self._sip_client.connection_age
+            )
+            # Don't fail immediately - let the command try and potentially trigger reconnect
 
         # Get command type for this lock
         if lock_id < 1 or lock_id > len(self._lock_commands):
@@ -543,12 +606,26 @@ class BticinoCoordinator(DataUpdateCoordinator):
             return False
 
         async with self._call_lock:
-            if not self._sip_client or not self._sip_client.is_registered:
+            if not self._sip_client:
+                error_msg = "not_initialized"
+                self._last_errors[station_id] = error_msg
+                self.async_set_updated_data(self.data)
+                _LOGGER.error("SIP client not initialized")
+                return False
+
+            if not self._sip_client.is_registered:
                 error_msg = "not_registered"
                 self._last_errors[station_id] = error_msg
                 self.async_set_updated_data(self.data)
                 _LOGGER.error("SIP client not registered")
                 return False
+
+            # Warn if connection is unhealthy but try anyway
+            if not self._sip_client.is_healthy:
+                _LOGGER.warning(
+                    "SIP connection unhealthy before call (age=%.0fs), proceeding anyway",
+                    self._sip_client.connection_age
+                )
 
             if self._current_call:
                 error_msg = "busy_call_in_progress"
@@ -686,6 +763,35 @@ class BticinoCoordinator(DataUpdateCoordinator):
         return self._sip_client is not None and self._sip_client.is_registered
 
     @property
+    def is_sip_healthy(self) -> bool:
+        """Return True if SIP connection is healthy (connected, registered, receiving data)."""
+        return self._sip_client is not None and self._sip_client.is_healthy
+
+    @property
+    def sip_connection_age(self) -> float:
+        """Return seconds since last SIP data was received."""
+        if self._sip_client:
+            return self._sip_client.connection_age
+        return float('inf')
+
+    async def async_force_sip_reconnect(self) -> bool:
+        """Force a SIP reconnection.
+
+        Useful when the frontend or automations detect issues that the
+        automatic health checks haven't caught.
+
+        Returns:
+            True if reconnection was initiated, False if no SIP client.
+        """
+        if not self._sip_client:
+            _LOGGER.error("Cannot force reconnect: SIP client not initialized")
+            return False
+
+        _LOGGER.info("Forcing SIP reconnection (requested by user/automation)")
+        await self._sip_client.force_reconnect()
+        return True
+
+    @property
     def has_active_call(self) -> bool:
         """Return True if there's an active call."""
         return self._current_call is not None
@@ -736,9 +842,51 @@ class BticinoCoordinator(DataUpdateCoordinator):
         return self._webrtc_urls.get(camera_id)
 
     def get_hls_available(self, camera_id: int) -> bool:
-        """Get HLS availability for a camera."""
-        return self._hls_available.get(camera_id, False)
+        """Get HLS availability for a camera (legacy, use get_stream_available)."""
+        return self._stream_available.get(camera_id, False)
 
     def set_hls_available(self, camera_id: int, available: bool) -> None:
-        """Set HLS availability for a camera."""
-        self._hls_available[camera_id] = available
+        """Set HLS availability for a camera (legacy, use set_stream_available)."""
+        self._stream_available[camera_id] = available
+
+    def get_stream_available(self, camera_id: int) -> bool:
+        """Get stream availability for a camera (WebRTC or HLS)."""
+        return self._stream_available.get(camera_id, False)
+
+    def set_stream_available(self, camera_id: int, available: bool) -> None:
+        """Set stream availability for a camera."""
+        self._stream_available[camera_id] = available
+
+    def is_webrtc_mode(self) -> bool:
+        """Check if WebRTC mode is active."""
+        return self._media_proxy is not None and self._media_proxy.is_webrtc_mode()
+
+    def get_go2rtc_api_url(self) -> str:
+        """Get go2rtc API base URL for WebRTC signaling."""
+        if self._media_proxy:
+            return self._media_proxy.get_go2rtc_api_url()
+        return ""
+
+    def get_webrtc_stream_id(self, camera_id: int) -> str:
+        """Get WebRTC stream ID for a camera."""
+        if self._media_proxy:
+            return self._media_proxy.get_stream_name(camera_id)
+        return ""
+
+    async def webrtc_offer(self, camera_id: int, sdp_offer: str) -> str | None:
+        """Process WebRTC offer and return SDP answer.
+
+        This is the signaling endpoint for frontend WebRTC connections.
+
+        Args:
+            camera_id: Camera identifier
+            sdp_offer: SDP offer from browser
+
+        Returns:
+            SDP answer from go2rtc, or None on error
+        """
+        if not self._media_proxy:
+            _LOGGER.error("Media proxy not initialized")
+            return None
+
+        return await self._media_proxy.webrtc_offer(camera_id, sdp_offer)

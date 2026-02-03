@@ -2,6 +2,38 @@
 
 Tutte le modifiche significative a questo progetto saranno documentate in questo file.
 
+## [4.0.0] - 2026-02-03
+
+### ⚠️ Breaking Changes
+- **WebRTC via go2rtc**: Il sistema video è stato completamente riscritto per usare WebRTC tramite go2rtc invece di HLS. Questo richiede il go2rtc add-on installato.
+- **Configurazione go2rtc richiesta**: Gli stream BTicino vengono configurati automaticamente in `go2rtc.yaml` al primo avvio.
+
+### Aggiunto
+- **WebRTC streaming**: Nuovo sistema di streaming video tramite go2rtc con latenza significativamente ridotta rispetto a HLS
+- **Auto-configurazione go2rtc**: L'integrazione configura automaticamente gli stream `bticino_live_1` attraverso `bticino_live_10` in `go2rtc.yaml`
+- **HTTPS WebRTC proxy**: Nuovo endpoint `/api/bticino_hometouch/webrtc/{stream_name}` per supportare WebRTC su connessioni HTTPS
+- **FFmpeg re-encoding**: Il video viene ri-encodato con keyframe frequenti per evitare artefatti verdi all'inizio dello stream
+- **Rilevamento fine stream**: La card rileva automaticamente quando lo stream viene chiuso dal gateway e mostra "Stream terminato"
+- **Gestione errori migliorata**: Messaggi di errore specifici per ogni codice SIP (486 → "Citofono occupato", 408 → "Timeout", ecc.)
+
+### Modificato
+- **Card v4.5.0**: Interfaccia aggiornata con:
+  - Rilevamento fine stream tramite evento `bticino_hometouch_call_ended`
+  - Icone dedicate per ogni tipo di errore (mdi:phone-off, mdi:timer-off, ecc.)
+  - Rimosso messaggio latenza (variabile a seconda delle condizioni)
+- **SIP client**: Aggiunto `last_error` per propagare errori specifici (486, 408, 480, 603) alla UI
+- **Media proxy**: FFmpeg usa libx264 con CRF 23, preset veryfast, keyframe ogni 15 frame
+
+### Rimosso
+- **HLS streaming**: Il fallback HLS è stato rimosso in favore del solo WebRTC
+- **Media proxy converter basato su RTP**: Sostituito con FFmpeg subprocess che fa push RTSP a go2rtc
+
+### Requisiti
+- Home Assistant 2024.11+ (go2rtc built-in) oppure go2rtc add-on installato
+- FFmpeg con libx264 (incluso in HA)
+
+---
+
 ## [3.0.0] - 2026-02-02
 
 ### ⚠️ Breaking Changes

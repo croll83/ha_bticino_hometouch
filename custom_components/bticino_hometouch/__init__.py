@@ -7,12 +7,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from pathlib import Path
 
+import aiohttp
+from aiohttp import web
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.components.frontend import async_register_built_in_panel
-from homeassistant.components.http import StaticPathConfig
+from homeassistant.components.http import StaticPathConfig, HomeAssistantView
 
 from .const import (
     DOMAIN,
@@ -52,6 +55,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
+    # Configure go2rtc streams for WebRTC
+    await _configure_go2rtc_streams(hass)
+
     # Register frontend card
     await _register_frontend_card(hass)
 
@@ -63,6 +69,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register audio WebSocket endpoint
     from .audio_websocket import setup_audio_websocket
     setup_audio_websocket(hass, coordinator)
+
+    # Register WebRTC proxy view for HTTPS support
+    hass.http.register_view(Go2RTCWebRTCProxyView())
 
     # Schedule certificate renewal check
     async def check_certificate_renewal(now: datetime) -> None:
@@ -175,6 +184,89 @@ async def _check_and_renew_certificate(
         _LOGGER.error("Failed to renew certificate: %s", err)
 
 
+async def _configure_go2rtc_streams(hass: HomeAssistant) -> None:
+    """Configure go2rtc.yaml with BTicino streams for WebRTC support.
+
+    go2rtc requires streams to be pre-configured in YAML to accept RTSP push.
+    This function adds bticino_live_1 through bticino_live_10 empty streams.
+    """
+    import yaml
+    import asyncio
+
+    go2rtc_config_path = Path("/config/go2rtc.yaml")
+
+    # Check if already configured
+    if DOMAIN in hass.data and "go2rtc_configured" in hass.data[DOMAIN]:
+        return
+
+    def _update_go2rtc_config():
+        """Update go2rtc.yaml with BTicino streams (runs in executor)."""
+        # Default config if file doesn't exist
+        config = {
+            "api": {"listen": ":1984", "allow_origin": "*"},
+            "rtsp": {"listen": ":8554"},
+            "webrtc": {
+                "listen": ":8555",
+                "candidates": ["stun:stun.l.google.com:19302"]
+            },
+            "ffmpeg": {"bin": "ffmpeg"},
+            "streams": {}
+        }
+
+        # Read existing config if present
+        if go2rtc_config_path.exists():
+            try:
+                with open(go2rtc_config_path, 'r') as f:
+                    existing = yaml.safe_load(f)
+                    if existing:
+                        config = existing
+            except Exception as e:
+                _LOGGER.warning("Could not read go2rtc.yaml: %s", e)
+
+        # Ensure streams section exists
+        if "streams" not in config or config["streams"] is None:
+            config["streams"] = {}
+
+        # Add BTicino streams if not present
+        streams_added = False
+        for i in range(1, 11):  # bticino_live_1 through bticino_live_10
+            stream_name = f"bticino_live_{i}"
+            if stream_name not in config["streams"]:
+                config["streams"][stream_name] = []
+                streams_added = True
+
+        if streams_added:
+            # Write updated config
+            try:
+                with open(go2rtc_config_path, 'w') as f:
+                    yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+                return True
+            except Exception as e:
+                _LOGGER.error("Could not write go2rtc.yaml: %s", e)
+                return False
+
+        return False  # No changes needed
+
+    try:
+        config_changed = await asyncio.to_thread(_update_go2rtc_config)
+
+        if config_changed:
+            _LOGGER.info("Added BTicino streams to go2rtc.yaml (bticino_live_1 to bticino_live_10)")
+            _LOGGER.warning(
+                "go2rtc.yaml was updated. Please restart the go2rtc add-on or Home Assistant "
+                "for changes to take effect."
+            )
+        else:
+            _LOGGER.debug("go2rtc.yaml already configured with BTicino streams")
+
+        # Mark as configured
+        hass.data.setdefault(DOMAIN, {})
+        hass.data[DOMAIN]["go2rtc_configured"] = True
+
+    except Exception as e:
+        _LOGGER.error("Failed to configure go2rtc streams: %s", e)
+
+
 async def _register_frontend_card(hass: HomeAssistant) -> None:
     """Register the BTicino Intercom custom card."""
     # Check if already registered
@@ -233,3 +325,41 @@ async def _register_frontend_card(hass: HomeAssistant) -> None:
     # Mark as registered
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN]["frontend_registered"] = True
+
+
+class Go2RTCWebRTCProxyView(HomeAssistantView):
+    """Proxy WebRTC requests to go2rtc to allow HTTPS access."""
+
+    url = "/api/bticino_hometouch/webrtc/{stream_name}"
+    name = "api:bticino_hometouch:webrtc"
+    requires_auth = False  # Allow unauthenticated for WebRTC signaling
+
+    async def post(self, request: web.Request, stream_name: str) -> web.Response:
+        """Handle WebRTC offer and proxy to go2rtc."""
+        try:
+            # Get the offer from request body
+            body = await request.json()
+
+            # Forward to go2rtc
+            go2rtc_url = f"http://127.0.0.1:1984/api/webrtc?src={stream_name}"
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    go2rtc_url,
+                    json=body,
+                    headers={"Content-Type": "application/json"},
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    if resp.status == 200:
+                        answer = await resp.json()
+                        return web.json_response(answer)
+                    else:
+                        error_text = await resp.text()
+                        _LOGGER.error("go2rtc error: %d %s", resp.status, error_text)
+                        return web.json_response(
+                            {"error": f"go2rtc error: {resp.status}"},
+                            status=resp.status
+                        )
+        except Exception as e:
+            _LOGGER.error("WebRTC proxy error: %s", e)
+            return web.json_response({"error": str(e)}, status=500)

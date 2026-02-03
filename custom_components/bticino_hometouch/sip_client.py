@@ -102,6 +102,13 @@ FIXED_AUDIO_PORT = 7076  # Same as Linphone linphonerc_factory
 class SIPClient:
     """Pure Python SIP client with TLS support for BTicino intercom."""
 
+    # Connection health constants
+    RECEIVE_TIMEOUT = 120  # Seconds to wait for any data before considering connection dead
+    HEARTBEAT_INTERVAL = 30  # Seconds between heartbeat OPTIONS
+    RECONNECT_BASE_DELAY = 3  # Initial delay for reconnect
+    RECONNECT_MAX_DELAY = 300  # Maximum delay (5 minutes)
+    RECONNECT_MAX_ATTEMPTS = 10  # Maximum consecutive reconnect attempts before giving up
+
     def __init__(
         self,
         config: SIPConfig,
@@ -123,7 +130,10 @@ class SIPClient:
         self._running = False
         self._recv_task: asyncio.Task | None = None
         self._register_task: asyncio.Task | None = None
+        self._heartbeat_task: asyncio.Task | None = None  # Proactive heartbeat task
         self._intentional_disconnect = False  # Track if disconnect is intentional (for 407 auth)
+        self._reconnect_attempts = 0  # Track consecutive reconnect attempts
+        self._last_data_received = 0.0  # Timestamp of last data received
 
         self._local_cseq = 1
         self._call_id_counter = 0
@@ -140,6 +150,9 @@ class SIPClient:
         self._proxy_opaque: str = ""
         self._proxy_algorithm: str = "MD5"
         self._proxy_nc: int = 0  # nonce count
+
+        # Last error from failed operations (for coordinator to read)
+        self.last_error: str | None = None
 
         # Determine local IP
         if not config.local_ip:
@@ -247,7 +260,10 @@ class SIPClient:
 
             self._running = True
             self._intentional_disconnect = False  # Reset on new connection
+            self._reconnect_attempts = 0  # Reset on successful connection
+            self._last_data_received = time.time()  # Initialize timestamp
             self._recv_task = asyncio.create_task(self._receive_loop())
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())  # Start heartbeat
 
             _LOGGER.info("Connected to SIP server %s:%d", self._config.server, self._config.port)
             return True
@@ -289,6 +305,13 @@ class SIPClient:
             except asyncio.CancelledError:
                 pass
 
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+
         if self._writer:
             self._writer.close()
             await self._writer.wait_closed()
@@ -297,31 +320,64 @@ class SIPClient:
         _LOGGER.info("Disconnected from SIP server")
 
     async def _auto_reconnect(self):
-        """Automatically reconnect to SIP server after connection loss."""
-        # Wait a bit before reconnecting
-        await asyncio.sleep(3)
+        """Automatically reconnect to SIP server after connection loss.
 
-        if self._running:
-            # Already running again, skip
+        Uses exponential backoff with jitter to avoid thundering herd.
+        Gives up after RECONNECT_MAX_ATTEMPTS consecutive failures.
+        """
+        self._reconnect_attempts += 1
+
+        if self._reconnect_attempts > self.RECONNECT_MAX_ATTEMPTS:
+            _LOGGER.error(
+                "Giving up auto-reconnect after %d consecutive failures. "
+                "Manual intervention required (restart HA or reload integration).",
+                self.RECONNECT_MAX_ATTEMPTS
+            )
+            self._registration_state = RegistrationState.FAILED
             return
 
-        _LOGGER.info("Attempting automatic reconnection to SIP server...")
+        # Calculate delay with exponential backoff + jitter
+        delay = min(
+            self.RECONNECT_BASE_DELAY * (2 ** (self._reconnect_attempts - 1)),
+            self.RECONNECT_MAX_DELAY
+        )
+        # Add random jitter (±25%)
+        jitter = delay * 0.25 * (random.random() * 2 - 1)
+        delay = delay + jitter
+
+        _LOGGER.info(
+            "Auto-reconnect attempt %d/%d in %.1f seconds...",
+            self._reconnect_attempts, self.RECONNECT_MAX_ATTEMPTS, delay
+        )
+
+        await asyncio.sleep(delay)
+
+        if self._running:
+            # Already running again (manual reconnect?), skip
+            _LOGGER.debug("Already running, skipping auto-reconnect")
+            return
 
         try:
             if await self.connect():
                 if await self.register():
-                    _LOGGER.info("Successfully reconnected and re-registered")
+                    _LOGGER.info(
+                        "Successfully reconnected and re-registered after %d attempts",
+                        self._reconnect_attempts
+                    )
+                    # Reset counter on success (done in connect() but be explicit)
+                    self._reconnect_attempts = 0
+                    return
                 else:
-                    _LOGGER.error("Reconnected but failed to register")
+                    _LOGGER.error("Reconnected but failed to register, will retry")
             else:
-                _LOGGER.error("Failed to reconnect to SIP server")
-                # Try again after a longer delay
-                await asyncio.sleep(10)
-                asyncio.create_task(self._auto_reconnect())
+                _LOGGER.error("Failed to reconnect to SIP server, will retry")
+
+            # Schedule next attempt
+            asyncio.create_task(self._auto_reconnect())
+
         except Exception as e:
             _LOGGER.error("Error during auto-reconnect: %s", e)
-            # Try again
-            await asyncio.sleep(10)
+            # Schedule next attempt
             asyncio.create_task(self._auto_reconnect())
 
     async def register(self) -> bool:
@@ -675,25 +731,54 @@ class SIPClient:
         return "\r\n".join(lines)
 
     async def _send(self, message: str):
-        """Send a SIP message."""
+        """Send a SIP message.
+
+        Raises:
+            ConnectionError: If not connected or connection is dead
+        """
         if not self._writer:
-            raise ConnectionError("Not connected")
+            raise ConnectionError("Not connected: writer is None")
+
+        if not self._running:
+            raise ConnectionError("Not connected: client not running")
+
+        # Check if writer is closing/closed
+        if self._writer.is_closing():
+            raise ConnectionError("Not connected: connection is closing")
 
         # Log SIP messages - truncate for normal operations, debug level
         _LOGGER.debug("Sending SIP message:\n%s", message[:500])
-        self._writer.write(message.encode('utf-8'))
-        await self._writer.drain()
+
+        try:
+            self._writer.write(message.encode('utf-8'))
+            await self._writer.drain()
+        except (ConnectionResetError, BrokenPipeError, OSError) as e:
+            _LOGGER.error("Failed to send SIP message: %s", e)
+            raise ConnectionError(f"Connection lost: {e}") from e
 
     async def _receive_loop(self):
-        """Receive loop for SIP messages."""
+        """Receive loop for SIP messages.
+
+        Uses timeout to detect dead connections that don't properly close.
+        If no data is received within RECEIVE_TIMEOUT seconds, the connection
+        is considered dead and auto-reconnect is triggered.
+        """
         buffer = b""  # Use bytes buffer for more reliable handling
 
         while self._running and self._reader:
             try:
-                data = await self._reader.read(8192)  # Larger buffer
+                # Use timeout to detect dead connections
+                data = await asyncio.wait_for(
+                    self._reader.read(8192),
+                    timeout=self.RECEIVE_TIMEOUT
+                )
+
                 if not data:
+                    _LOGGER.warning("Received empty data, connection closed by server")
                     break
 
+                # Update timestamp on successful data receive
+                self._last_data_received = time.time()
                 buffer += data
 
                 # Parse complete messages
@@ -720,8 +805,17 @@ class SIPClient:
 
                     await self._handle_message(message)
 
+            except asyncio.TimeoutError:
+                _LOGGER.warning(
+                    "No data received for %d seconds, connection appears dead",
+                    self.RECEIVE_TIMEOUT
+                )
+                break
             except asyncio.CancelledError:
                 _LOGGER.debug("Receive loop cancelled")
+                break
+            except ConnectionResetError:
+                _LOGGER.warning("Connection reset by peer")
                 break
             except Exception as e:
                 _LOGGER.error("Error in receive loop: %s", e)
@@ -1066,17 +1160,141 @@ class SIPClient:
         ok_response = f"SIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n"
         await self._send(ok_response)
 
+    async def _heartbeat_loop(self):
+        """Send periodic OPTIONS to keep connection alive and detect dead connections.
+
+        This proactively sends OPTIONS requests to the server. If the server doesn't
+        respond (detected by receive_loop timeout), the connection is considered dead.
+        This prevents silent connection death where TCP stays open but nothing works.
+        """
+        _LOGGER.debug("Heartbeat loop started (interval: %ds)", self.HEARTBEAT_INTERVAL)
+
+        while self._running:
+            try:
+                await asyncio.sleep(self.HEARTBEAT_INTERVAL)
+
+                if not self._running:
+                    break
+
+                # Only send heartbeat if registered
+                if self._registration_state != RegistrationState.REGISTERED:
+                    _LOGGER.debug("Skipping heartbeat: not registered")
+                    continue
+
+                # Check if we've received data recently
+                time_since_last = time.time() - self._last_data_received
+                if time_since_last > self.HEARTBEAT_INTERVAL * 2:
+                    _LOGGER.warning(
+                        "No data received for %.0f seconds, connection may be stale",
+                        time_since_last
+                    )
+
+                # Send OPTIONS as heartbeat
+                await self._send_heartbeat_options()
+                _LOGGER.debug("Heartbeat OPTIONS sent")
+
+            except asyncio.CancelledError:
+                _LOGGER.debug("Heartbeat loop cancelled")
+                break
+            except ConnectionError as e:
+                _LOGGER.warning("Heartbeat failed (connection error): %s", e)
+                # Connection is dead, receive_loop should handle reconnect
+                break
+            except Exception as e:
+                _LOGGER.error("Error in heartbeat loop: %s", e)
+                # Continue trying
+                continue
+
+        _LOGGER.debug("Heartbeat loop exited")
+
+    async def _send_heartbeat_options(self):
+        """Send an OPTIONS request as a heartbeat to keep connection alive."""
+        branch = self._generate_branch()
+        tag = self._generate_tag()
+        call_id = self._generate_call_id()
+
+        from_uri = f"sip:{self._config.username}@{self._config.domain}"
+        to_uri = f"sip:{self._config.domain}"
+
+        options = "\r\n".join([
+            f"OPTIONS {to_uri} SIP/2.0",
+            f"Via: SIP/2.0/TLS {self._config.local_ip}:{self._config.local_port};branch={branch}",
+            f"From: <{from_uri}>;tag={tag}",
+            f"To: <{to_uri}>",
+            f"Call-ID: {call_id}",
+            "CSeq: 1 OPTIONS",
+            "Max-Forwards: 70",
+            "Content-Length: 0",
+            "",
+            "",
+        ])
+
+        await self._send(options)
+
     async def _reregister_loop(self):
-        """Periodically re-register."""
+        """Periodically re-register.
+
+        If re-registration fails, triggers auto-reconnect to recover from
+        connection issues that may have gone undetected.
+        """
+        consecutive_failures = 0
+        max_failures = 3  # Trigger reconnect after 3 consecutive failures
+
         while self._running:
             await asyncio.sleep(3600)  # Re-register every hour
-            if self._running and self._registration_state == RegistrationState.REGISTERED:
-                self._registration_cseq += 1
-                request = self._build_register_request()
-                try:
-                    await self._send(request)
-                except Exception as e:
-                    _LOGGER.error("Re-registration failed: %s", e)
+
+            if not self._running:
+                break
+
+            if self._registration_state != RegistrationState.REGISTERED:
+                _LOGGER.debug("Skipping re-registration: not currently registered")
+                continue
+
+            self._registration_cseq += 1
+            request = self._build_register_request()
+
+            try:
+                await self._send(request)
+                _LOGGER.debug("Re-registration REGISTER sent")
+
+                # Wait for response (with timeout)
+                # Note: response is handled in _handle_register_response
+                # We just wait a bit and check the state
+                await asyncio.sleep(5)
+
+                if self._registration_state == RegistrationState.REGISTERED:
+                    consecutive_failures = 0
+                    _LOGGER.debug("Re-registration successful")
+                else:
+                    consecutive_failures += 1
+                    _LOGGER.warning(
+                        "Re-registration state is %s after REGISTER (failure %d/%d)",
+                        self._registration_state, consecutive_failures, max_failures
+                    )
+
+            except ConnectionError as e:
+                consecutive_failures += 1
+                _LOGGER.error(
+                    "Re-registration failed (connection error, failure %d/%d): %s",
+                    consecutive_failures, max_failures, e
+                )
+            except Exception as e:
+                consecutive_failures += 1
+                _LOGGER.error(
+                    "Re-registration failed (failure %d/%d): %s",
+                    consecutive_failures, max_failures, e
+                )
+
+            # Trigger reconnect if too many failures
+            if consecutive_failures >= max_failures:
+                _LOGGER.warning(
+                    "Too many re-registration failures (%d), triggering reconnect",
+                    consecutive_failures
+                )
+                self._running = False
+                self._registration_state = RegistrationState.UNREGISTERED
+                asyncio.create_task(self._auto_reconnect())
+                break
 
     async def initiate_call(
         self,
@@ -1095,6 +1313,9 @@ class SIPClient:
         Returns:
             SIPCall object if successful, None if failed
         """
+        # Clear any previous error
+        self.last_error = None
+
         if not self.is_registered:
             _LOGGER.error("Cannot initiate call: not registered")
             return None
@@ -1435,9 +1656,23 @@ class SIPClient:
                     call.state = CallState.NEEDS_AUTH
 
         elif status_code >= 400:
-            # Error
+            # Error - save specific error type for coordinator
             call.state = CallState.DISCONNECTED
-            _LOGGER.warning("INVITE failed with %d", status_code)
+            if status_code == 486:
+                self.last_error = "busy_gateway"
+                _LOGGER.warning("INVITE failed with 486 Busy Here - gateway is busy")
+            elif status_code == 408:
+                self.last_error = "timeout"
+                _LOGGER.warning("INVITE failed with 408 Request Timeout")
+            elif status_code == 480:
+                self.last_error = "unavailable"
+                _LOGGER.warning("INVITE failed with 480 Temporarily Unavailable")
+            elif status_code == 603:
+                self.last_error = "declined"
+                _LOGGER.warning("INVITE failed with 603 Decline")
+            else:
+                self.last_error = f"sip_error_{status_code}"
+                _LOGGER.warning("INVITE failed with %d", status_code)
 
             if self._on_call_state_changed:
                 self._on_call_state_changed(call, call.state)
@@ -1648,6 +1883,55 @@ class SIPClient:
     def is_registered(self) -> bool:
         """Return True if registered."""
         return self._registration_state == RegistrationState.REGISTERED
+
+    @property
+    def is_connected(self) -> bool:
+        """Return True if connected (regardless of registration state)."""
+        return (
+            self._running
+            and self._writer is not None
+            and not self._writer.is_closing()
+        )
+
+    @property
+    def is_healthy(self) -> bool:
+        """Return True if connection is healthy (connected, registered, and receiving data).
+
+        This is a more comprehensive check than is_registered, useful before
+        sending commands that require a working connection.
+        """
+        if not self.is_connected or not self.is_registered:
+            return False
+
+        # Check if we've received data recently
+        time_since_last = time.time() - self._last_data_received
+        # Allow some slack (3x heartbeat interval) for quiet periods
+        max_silence = self.HEARTBEAT_INTERVAL * 3
+        if time_since_last > max_silence:
+            _LOGGER.debug(
+                "Connection may be unhealthy: no data for %.0f seconds (max: %d)",
+                time_since_last, max_silence
+            )
+            return False
+
+        return True
+
+    @property
+    def connection_age(self) -> float:
+        """Return seconds since last data was received."""
+        return time.time() - self._last_data_received
+
+    async def force_reconnect(self):
+        """Force a reconnection to the SIP server.
+
+        Useful when external code detects issues that this client cannot.
+        """
+        _LOGGER.info("Forcing reconnection to SIP server...")
+        self._intentional_disconnect = False  # Allow auto-reconnect
+        await self.disconnect()
+        # Auto-reconnect will be triggered by receive_loop exit
+        # But we can also trigger it directly
+        asyncio.create_task(self._auto_reconnect())
 
     @property
     def active_calls(self) -> list[SIPCall]:

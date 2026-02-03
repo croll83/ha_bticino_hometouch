@@ -1,23 +1,9 @@
 /**
- * BTicino Intercom Card v3.2
+ * BTicino Intercom Card v4.5.0
  *
- * A compact Lovelace card for BTicino Door Entry intercom.
- * Displays all outdoor stations in a horizontal layout with video popup.
- *
- * Features:
- * - Compact horizontal layout with all stations
- * - Video popup with HLS streaming
- * - Door unlock with visual feedback
- * - Incoming call banner notification
- * - Graceful "Stream Ended" message when call terminates
- *
- * Limitations:
- * - Audio is NOT supported (BTicino cloud gateway limitation)
- * - Video has ~8 second latency
- * - Only on-demand calls from HA are supported
+ * WebRTC-only card for BTicino Door Entry intercom via go2rtc.
+ * Real-time video streaming with automatic stream end detection.
  */
-
-import "https://cdn.jsdelivr.net/npm/hls.js@latest";
 
 class BticinoIntercomCard extends HTMLElement {
 
@@ -26,36 +12,24 @@ class BticinoIntercomCard extends HTMLElement {
   }
 
   static getStubConfig() {
-    return {
-      title: "Citofono",
-      show_title: true
-    };
+    return { title: "Citofono", show_title: true };
   }
 
   set hass(hass) {
     this._hass = hass;
-    if (!this._rendered) return;
-    this._updateCard();
+    if (this._rendered) this._updateCard();
   }
 
   setConfig(config) {
-    this._config = {
-      title: "Citofono",
-      show_title: true,
-      ...config
-    };
+    this._config = { title: "Citofono", show_title: true, ...config };
     this._rendered = false;
-    this._hlsPlayer = null;
     this._activeStation = null;
     this._popupOpen = false;
-    this._unlockSubscription = null;
-    this._incomingCallSubscription = null;
+    this._peerConnection = null;
   }
 
-  // Entity ID patterns - all BTicino Hometouch entities use this prefix
   static get ENTITY_PREFIX() { return 'bticino_hometouch_'; }
 
-  // Get entity IDs directly by pattern - no ambiguity with other integrations
   _getViewVideoButton(stationId) {
     return `button.${BticinoIntercomCard.ENTITY_PREFIX}view_video_station_${stationId}`;
   }
@@ -82,17 +56,19 @@ class BticinoIntercomCard extends HTMLElement {
   }
 
   async _subscribeToEvents() {
-    if (this._hass && this._hass.connection) {
+    if (this._hass?.connection) {
       try {
-        // Subscribe to door unlock events
         this._unlockSubscription = await this._hass.connection.subscribeEvents(
           (event) => this._onDoorUnlocked(event),
           'bticino_hometouch_door_unlocked'
         );
-        // Subscribe to incoming call events
         this._incomingCallSubscription = await this._hass.connection.subscribeEvents(
           (event) => this._onIncomingCall(event),
           'bticino_hometouch_incoming_call'
+        );
+        this._callEndedSubscription = await this._hass.connection.subscribeEvents(
+          (event) => this._onCallEnded(event),
+          'bticino_hometouch_call_ended'
         );
       } catch (e) {
         console.warn('Failed to subscribe to events:', e);
@@ -101,19 +77,22 @@ class BticinoIntercomCard extends HTMLElement {
   }
 
   _unsubscribeFromEvents() {
-    if (this._unlockSubscription && typeof this._unlockSubscription === 'function') {
+    if (typeof this._unlockSubscription === 'function') {
       try { this._unlockSubscription(); } catch (e) {}
-      this._unlockSubscription = null;
     }
-    if (this._incomingCallSubscription && typeof this._incomingCallSubscription === 'function') {
+    if (typeof this._incomingCallSubscription === 'function') {
       try { this._incomingCallSubscription(); } catch (e) {}
-      this._incomingCallSubscription = null;
     }
+    if (typeof this._callEndedSubscription === 'function') {
+      try { this._callEndedSubscription(); } catch (e) {}
+    }
+    this._unlockSubscription = null;
+    this._incomingCallSubscription = null;
+    this._callEndedSubscription = null;
   }
 
   _onDoorUnlocked(event) {
-    const lockId = event.data.lock_id;
-    const btn = this.querySelector(`.action-btn.unlock[data-station-id="${lockId}"]`);
+    const btn = this.querySelector(`.action-btn.unlock[data-station-id="${event.data.lock_id}"]`);
     if (btn) {
       btn.classList.remove('waiting', 'error');
       btn.classList.add('success');
@@ -122,395 +101,153 @@ class BticinoIntercomCard extends HTMLElement {
   }
 
   _onIncomingCall(event) {
-    // Show incoming call banner
     const stationId = event.data.station_id;
     const stationName = event.data.station_name || `Posto Esterno ${stationId}`;
-    this._showIncomingCallBanner(stationId, stationName);
+    this._showBanner(stationId, stationName);
   }
 
-  _showIncomingCallBanner(stationId, stationName) {
+  _onCallEnded(event) {
+    const stationId = event.data.station_id;
+    // Only handle if popup is open for this station
+    if (this._popupOpen && this._activeStation === stationId) {
+      this._showErrorOverlay('Stream terminato', 'La chiamata è stata chiusa', 'mdi:video-off');
+    }
+  }
+
+  _showBanner(stationId, stationName) {
     const banner = this.querySelector('#incoming-call-banner');
     const bannerText = this.querySelector('#incoming-call-text');
-
     if (banner && bannerText) {
-      bannerText.textContent = `📞 Chiamata in arrivo da ${stationName}`;
+      bannerText.textContent = `📞 Chiamata da ${stationName}`;
       banner.classList.add('visible');
       banner.dataset.stationId = stationId;
-
-      // Auto-hide after 30 seconds (typical ring duration)
-      if (this._bannerTimeout) clearTimeout(this._bannerTimeout);
-      this._bannerTimeout = setTimeout(() => {
-        this._hideIncomingCallBanner();
-      }, 30000);
+      clearTimeout(this._bannerTimeout);
+      this._bannerTimeout = setTimeout(() => this._hideBanner(), 30000);
     }
   }
 
-  _hideIncomingCallBanner() {
+  _hideBanner() {
     const banner = this.querySelector('#incoming-call-banner');
-    if (banner) {
-      banner.classList.remove('visible');
-    }
-    if (this._bannerTimeout) {
-      clearTimeout(this._bannerTimeout);
-      this._bannerTimeout = null;
-    }
+    if (banner) banner.classList.remove('visible');
+    clearTimeout(this._bannerTimeout);
   }
 
   _getStations() {
     if (!this._hass) return [];
-
-    const stations = [];
     const prefix = `camera.${BticinoIntercomCard.ENTITY_PREFIX}camera_`;
-
-    // Find BTicino Hometouch camera entities by their fixed entity_id pattern
-    // Pattern: camera.bticino_hometouch_camera_N
-    const cameraEntities = Object.keys(this._hass.states)
+    return Object.keys(this._hass.states)
       .filter(e => e.startsWith(prefix))
-      .sort();
-
-    for (const entityId of cameraEntities) {
-      const state = this._hass.states[entityId];
-      // Extract station ID from entity_id (e.g., camera.bticino_hometouch_camera_1 -> 1)
-      const stationId = parseInt(entityId.replace(prefix, '')) || 1;
-      const stationName = state.attributes.friendly_name || `Station ${stationId}`;
-
-      stations.push({
-        entityId,
-        stationId: stationId,
-        name: stationName,
-        state: state,
-        isRinging: state.attributes.is_ringing,
-        isConnected: state.attributes.is_connected,
-        hlsUrl: state.attributes.hls_url,
-        hlsAvailable: state.attributes.hls_available,
-        lastError: state.attributes.last_error
+      .sort()
+      .map(entityId => {
+        const state = this._hass.states[entityId];
+        const stationId = parseInt(entityId.replace(prefix, '')) || 1;
+        return {
+          entityId,
+          stationId,
+          name: state.attributes.friendly_name || `Station ${stationId}`,
+          isRinging: state.attributes.is_ringing,
+          isConnected: state.attributes.is_connected,
+          webrtcUrl: state.attributes.webrtc_url,
+          streamReady: state.attributes.is_connected && state.attributes.webrtc_available,
+          lastError: state.attributes.last_error
+        };
       });
-    }
-
-    return stations;
   }
 
   _render() {
     const stations = this._getStations();
-
     this.innerHTML = `
       <ha-card>
         <style>
-          :host {
-            --card-padding: 12px;
-          }
-          .card-container {
-            padding: var(--card-padding);
-          }
-          .card-title {
-            font-size: 1.1em;
-            font-weight: 500;
-            margin-bottom: 12px;
-            color: var(--primary-text-color);
-          }
-
-          /* Incoming call banner */
+          .card-container { padding: 12px; }
+          .card-title { font-size: 1.1em; font-weight: 500; margin-bottom: 12px; }
           .incoming-call-banner {
-            display: none;
-            background: linear-gradient(135deg, #ff9800 0%, #f57c00 100%);
-            color: white;
-            padding: 12px 16px;
-            margin-bottom: 12px;
-            border-radius: 8px;
-            font-weight: 500;
-            animation: pulse-banner 1.5s infinite;
-            align-items: center;
-            justify-content: space-between;
+            display: none; background: linear-gradient(135deg, #ff9800, #f57c00);
+            color: white; padding: 12px 16px; margin-bottom: 12px; border-radius: 8px;
+            font-weight: 500; animation: pulse-banner 1.5s infinite;
+            justify-content: space-between; align-items: center;
           }
-          .incoming-call-banner.visible {
-            display: flex;
-          }
+          .incoming-call-banner.visible { display: flex; }
           .incoming-call-banner .dismiss-btn {
-            background: rgba(255,255,255,0.2);
-            border: none;
-            color: white;
-            padding: 4px 8px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 0.9em;
+            background: rgba(255,255,255,0.2); border: none; color: white;
+            padding: 4px 8px; border-radius: 4px; cursor: pointer;
           }
-          .incoming-call-banner .dismiss-btn:hover {
-            background: rgba(255,255,255,0.3);
-          }
-          @keyframes pulse-banner {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.85; }
-          }
-
-          .stations-row {
-            display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
-          }
+          @keyframes pulse-banner { 0%, 100% { opacity: 1; } 50% { opacity: 0.85; } }
+          .stations-row { display: flex; gap: 8px; flex-wrap: wrap; }
           .station-block {
-            flex: 1;
-            min-width: 120px;
-            background: var(--card-background-color, var(--ha-card-background));
-            border: 1px solid var(--divider-color);
-            border-radius: 8px;
-            padding: 10px;
-            transition: all 0.2s ease;
+            flex: 1; min-width: 120px; background: var(--card-background-color);
+            border: 1px solid var(--divider-color); border-radius: 8px; padding: 10px;
           }
-          .station-block:hover {
-            border-color: var(--primary-color);
-          }
-          .station-block.ringing {
-            border-color: var(--warning-color, #ff9800);
-            animation: ring-pulse 1s infinite;
-          }
-          .station-block.connected {
-            border-color: var(--success-color, #4caf50);
-          }
-          @keyframes ring-pulse {
-            0%, 100% { box-shadow: 0 0 0 0 rgba(255, 152, 0, 0.4); }
-            50% { box-shadow: 0 0 0 8px rgba(255, 152, 0, 0); }
-          }
-          .station-name {
-            font-size: 0.9em;
-            font-weight: 500;
-            margin-bottom: 8px;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-          }
-          .station-actions {
-            display: flex;
-            gap: 8px;
-            justify-content: center;
-          }
+          .station-block:hover { border-color: var(--primary-color); }
+          .station-block.ringing { border-color: var(--warning-color, #ff9800); animation: ring-pulse 1s infinite; }
+          .station-block.connected { border-color: var(--success-color, #4caf50); }
+          @keyframes ring-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(255,152,0,0.4); } 50% { box-shadow: 0 0 0 8px rgba(255,152,0,0); } }
+          .station-name { font-size: 0.9em; font-weight: 500; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; }
+          .station-actions { display: flex; gap: 8px; justify-content: center; }
           .action-btn {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            width: 40px;
-            height: 40px;
-            border-radius: 50%;
-            border: none;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            background: var(--primary-background-color);
+            display: flex; align-items: center; justify-content: center;
+            width: 40px; height: 40px; border-radius: 50%; border: none;
+            cursor: pointer; background: var(--primary-background-color);
           }
-          .action-btn:hover {
-            transform: scale(1.1);
-          }
-          .action-btn:active {
-            transform: scale(0.95);
-          }
-          .action-btn.view {
-            color: var(--primary-color);
-          }
-          .action-btn.view:hover {
-            background: var(--primary-color);
-            color: white;
-          }
-          .action-btn.unlock {
-            color: var(--primary-color);
-          }
-          .action-btn.unlock:hover {
-            background: var(--primary-color);
-            color: white;
-          }
-          .action-btn.unlock.success {
-            background: var(--success-color, #4caf50) !important;
-            color: white !important;
-          }
-          .action-btn.unlock.error {
-            background: var(--error-color, #f44336) !important;
-            color: white !important;
-          }
-          .action-btn.unlock.waiting {
-            opacity: 0.6;
-            cursor: wait;
-          }
-          .action-btn ha-icon {
-            --mdc-icon-size: 20px;
-          }
+          .action-btn:hover { transform: scale(1.1); }
+          .action-btn.view { color: var(--primary-color); }
+          .action-btn.view:hover { background: var(--primary-color); color: white; }
+          .action-btn.unlock { color: var(--primary-color); }
+          .action-btn.unlock:hover { background: var(--primary-color); color: white; }
+          .action-btn.unlock.success { background: var(--success-color, #4caf50) !important; color: white !important; }
+          .action-btn.unlock.error { background: var(--error-color, #f44336) !important; color: white !important; }
+          .action-btn.unlock.waiting { opacity: 0.6; cursor: wait; }
+          .action-btn ha-icon { --mdc-icon-size: 20px; }
 
-          /* Popup styles */
           .popup-overlay {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: rgba(0, 0, 0, 0.8);
-            z-index: 9999;
-            align-items: center;
-            justify-content: center;
+            display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.8); z-index: 9999; align-items: center; justify-content: center;
           }
-          .popup-overlay.open {
-            display: flex;
-          }
+          .popup-overlay.open { display: flex; }
           .popup-content {
-            background: var(--card-background-color, #fff);
-            border-radius: 12px;
-            overflow: hidden;
-            max-width: 90vw;
-            max-height: 90vh;
-            width: 640px;
+            background: var(--card-background-color, #fff); border-radius: 12px;
+            overflow: hidden; max-width: 90vw; max-height: 90vh; width: 640px;
           }
           .popup-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 12px 16px;
-            border-bottom: 1px solid var(--divider-color);
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 12px 16px; border-bottom: 1px solid var(--divider-color);
           }
-          .popup-title {
-            font-size: 1.1em;
-            font-weight: 500;
-          }
-          .popup-close {
-            background: none;
-            border: none;
-            cursor: pointer;
-            padding: 4px;
-            color: var(--secondary-text-color);
-          }
-          .popup-close:hover {
-            color: var(--primary-text-color);
-          }
-          .video-container {
-            position: relative;
-            width: 100%;
-            padding-bottom: 56.25%; /* 16:9 */
-            background: #000;
-          }
+          .popup-title { font-size: 1.1em; font-weight: 500; }
+          .popup-close { background: none; border: none; cursor: pointer; padding: 4px; color: var(--secondary-text-color); }
+          .video-container { position: relative; width: 100%; padding-bottom: 56.25%; background: #000; }
           .video-container video {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            object-fit: contain;
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain;
           }
-          .video-container .placeholder {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            color: #888;
+          .video-container .status-overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            color: white; background: rgba(0,0,0,0.85); z-index: 10;
+            transition: opacity 0.3s ease;
           }
-          .video-container .placeholder ha-icon {
-            --mdc-icon-size: 48px;
-            margin-bottom: 8px;
-          }
-          .video-container .loading {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            color: white;
-            background: rgba(0, 0, 0, 0.85);
-            z-index: 10;
-          }
-          .video-container .loading .loading-spinner {
-            margin-bottom: 16px;
-          }
-          .video-container .loading .loading-text {
-            font-size: 1.1em;
-            font-weight: 500;
-            margin-bottom: 8px;
-          }
-          .video-container .loading .loading-status {
-            font-size: 0.85em;
-            color: rgba(255, 255, 255, 0.7);
-            animation: pulse 1.5s infinite;
-          }
-          @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-          }
-          .video-container .buffering-overlay {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            display: none;
-            align-items: center;
-            justify-content: center;
-            background: rgba(0, 0, 0, 0.4);
-            z-index: 12;
+          .video-container .status-overlay.hidden { display: none; }
+          .video-container .status-overlay.syncing {
+            background: rgba(0,0,0,0.6);
             pointer-events: none;
           }
-          .video-container .buffering-overlay.visible {
-            display: flex;
-          }
-          .video-container .buffering-overlay .buffering-content {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            color: white;
-          }
-          .video-container .buffering-overlay .buffering-text {
-            margin-top: 12px;
-            font-size: 0.9em;
-          }
-          .popup-controls {
-            display: flex;
-            gap: 12px;
-            padding: 16px;
-            justify-content: center;
-          }
+          .video-container .status-overlay .status-text { font-size: 1.1em; font-weight: 500; margin-top: 16px; }
+          .video-container .status-overlay .status-sub { font-size: 0.85em; color: rgba(255,255,255,0.7); margin-top: 8px; }
+          .popup-controls { display: flex; gap: 12px; padding: 16px; justify-content: center; }
           .popup-btn {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 10px 20px;
-            border-radius: 8px;
-            border: none;
-            cursor: pointer;
-            font-size: 0.95em;
-            font-weight: 500;
-            transition: all 0.2s ease;
+            display: flex; align-items: center; gap: 8px; padding: 10px 20px;
+            border-radius: 8px; border: none; cursor: pointer; font-size: 0.95em; font-weight: 500;
           }
-          .popup-btn.hangup {
-            background: var(--error-color, #f44336);
-            color: white;
-          }
-          .popup-btn.hangup:hover {
-            filter: brightness(1.1);
-          }
-          .popup-btn ha-icon {
-            --mdc-icon-size: 18px;
-          }
-
-          /* Limitations notice */
-          .limitations-notice {
-            font-size: 0.75em;
-            color: var(--secondary-text-color);
-            text-align: center;
-            padding: 8px;
-            border-top: 1px solid var(--divider-color);
-          }
+          .popup-btn.hangup { background: var(--error-color, #f44336); color: white; }
+          .popup-btn.hangup:hover { filter: brightness(1.1); }
+          .popup-btn ha-icon { --mdc-icon-size: 18px; }
+          .latency-notice { font-size: 0.75em; color: var(--secondary-text-color); text-align: center; padding: 8px; border-top: 1px solid var(--divider-color); }
         </style>
 
         <div class="card-container">
           ${this._config.show_title ? `<div class="card-title">${this._config.title}</div>` : ''}
-
-          <!-- Incoming call banner -->
           <div class="incoming-call-banner" id="incoming-call-banner">
             <span id="incoming-call-text">📞 Chiamata in arrivo...</span>
             <button class="dismiss-btn" id="dismiss-banner">✕</button>
           </div>
-
           <div class="stations-row" id="stations-row">
             ${stations.map(s => this._renderStation(s)).join('')}
           </div>
@@ -520,42 +257,26 @@ class BticinoIntercomCard extends HTMLElement {
           <div class="popup-content">
             <div class="popup-header">
               <span class="popup-title" id="popup-title">Video</span>
-              <button class="popup-close" id="popup-close">
-                <ha-icon icon="mdi:close"></ha-icon>
-              </button>
+              <button class="popup-close" id="popup-close"><ha-icon icon="mdi:close"></ha-icon></button>
             </div>
             <div class="video-container" id="video-container">
-              <div class="placeholder" id="placeholder">
-                <ha-icon icon="mdi:video-off"></ha-icon>
-                <span>Connessione in corso...</span>
-              </div>
-              <video id="video" playsinline muted></video>
-              <div class="loading" id="loading" style="display: none;">
-                <ha-circular-progress indeterminate class="loading-spinner"></ha-circular-progress>
-                <div class="loading-text">Connessione in corso...</div>
-                <div class="loading-status" id="loading-status">Avvio chiamata video</div>
-              </div>
-              <div class="buffering-overlay" id="buffering-overlay">
-                <div class="buffering-content">
-                  <ha-circular-progress indeterminate></ha-circular-progress>
-                  <div class="buffering-text">Buffering...</div>
-                </div>
+              <video id="video" playsinline muted autoplay></video>
+              <div class="status-overlay" id="status-overlay">
+                <ha-circular-progress indeterminate></ha-circular-progress>
+                <div class="status-text" id="status-text">Connessione...</div>
+                <div class="status-sub" id="status-sub"></div>
               </div>
             </div>
             <div class="popup-controls">
               <button class="popup-btn hangup" id="btn-hangup">
-                <ha-icon icon="mdi:phone-hangup"></ha-icon>
-                Chiudi
+                <ha-icon icon="mdi:phone-hangup"></ha-icon> Chiudi
               </button>
             </div>
-            <div class="limitations-notice">
-              ⚠️ Solo video (audio non disponibile) • Latenza ~8s
-            </div>
+            <div class="latency-notice">WebRTC • Solo video</div>
           </div>
         </div>
       </ha-card>
     `;
-
     this._bindEvents();
   }
 
@@ -563,9 +284,8 @@ class BticinoIntercomCard extends HTMLElement {
     const classes = ['station-block'];
     if (station.isRinging) classes.push('ringing');
     if (station.isConnected) classes.push('connected');
-
     return `
-      <div class="${classes.join(' ')}" data-station-id="${station.stationId}" data-entity-id="${station.entityId}">
+      <div class="${classes.join(' ')}" data-station-id="${station.stationId}">
         <div class="station-name">${station.name}</div>
         <div class="station-actions">
           <button class="action-btn view" data-action="view" data-station-id="${station.stationId}" title="Visualizza">
@@ -580,146 +300,88 @@ class BticinoIntercomCard extends HTMLElement {
   }
 
   _bindEvents() {
-    // Station action buttons
     this.querySelectorAll('.action-btn').forEach(btn => {
-      btn.addEventListener('click', (e) => {
+      btn.addEventListener('click', () => {
         const action = btn.dataset.action;
         const stationId = parseInt(btn.dataset.stationId);
-
-        if (action === 'view') {
-          this._openVideoPopup(stationId);
-        } else if (action === 'unlock') {
-          this._unlockDoor(stationId, btn);
-        }
+        if (action === 'view') this._openVideoPopup(stationId);
+        else if (action === 'unlock') this._unlockDoor(stationId, btn);
       });
     });
 
-    // Popup controls
-    const popupClose = this.querySelector('#popup-close');
-    const btnHangup = this.querySelector('#btn-hangup');
-    const overlay = this.querySelector('#popup-overlay');
-    const dismissBanner = this.querySelector('#dismiss-banner');
-
-    if (popupClose) popupClose.addEventListener('click', () => this._closePopup());
-    if (btnHangup) btnHangup.addEventListener('click', () => this._hangupAndClose());
-    if (overlay) overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) this._closePopup();
+    this.querySelector('#popup-close')?.addEventListener('click', () => this._closePopup());
+    this.querySelector('#btn-hangup')?.addEventListener('click', () => this._hangupAndClose());
+    this.querySelector('#popup-overlay')?.addEventListener('click', (e) => {
+      if (e.target.id === 'popup-overlay') this._closePopup();
     });
-    if (dismissBanner) dismissBanner.addEventListener('click', () => this._hideIncomingCallBanner());
-
-    // Video events
-    const video = this.querySelector('#video');
-    const bufferingOverlay = this.querySelector('#buffering-overlay');
-
-    if (video) {
-      video.addEventListener('playing', () => this._onVideoPlaying());
-
-      video.addEventListener('waiting', () => {
-        if (this._popupOpen && bufferingOverlay) {
-          bufferingOverlay.classList.add('visible');
-        }
-      });
-
-      video.addEventListener('canplay', () => {
-        if (bufferingOverlay) bufferingOverlay.classList.remove('visible');
-      });
-
-      video.addEventListener('timeupdate', () => {
-        if (!video.paused && bufferingOverlay && bufferingOverlay.classList.contains('visible')) {
-          bufferingOverlay.classList.remove('visible');
-        }
-      });
-    }
+    this.querySelector('#dismiss-banner')?.addEventListener('click', () => this._hideBanner());
   }
 
   _updateCard() {
     const stations = this._getStations();
-    const stationsRow = this.querySelector('#stations-row');
-
-    if (stationsRow) {
-      stationsRow.innerHTML = stations.map(s => this._renderStation(s)).join('');
+    const row = this.querySelector('#stations-row');
+    if (row) {
+      row.innerHTML = stations.map(s => this._renderStation(s)).join('');
       this.querySelectorAll('.action-btn').forEach(btn => {
-        btn.addEventListener('click', (e) => {
+        btn.addEventListener('click', () => {
           const action = btn.dataset.action;
           const stationId = parseInt(btn.dataset.stationId);
-
-          if (action === 'view') {
-            this._openVideoPopup(stationId);
-          } else if (action === 'unlock') {
-            this._unlockDoor(stationId, btn);
-          }
+          if (action === 'view') this._openVideoPopup(stationId);
+          else if (action === 'unlock') this._unlockDoor(stationId, btn);
         });
       });
     }
-
-    // Check for incoming calls based on station state
     for (const station of stations) {
       if (station.isRinging) {
-        this._showIncomingCallBanner(station.stationId, station.name);
+        this._showBanner(station.stationId, station.name);
         break;
       }
-    }
-
-    if (this._popupOpen && this._activeStation) {
-      this._updateVideoStream();
     }
   }
 
   async _openVideoPopup(stationId) {
     this._activeStation = stationId;
     this._popupOpen = true;
-    this._hideIncomingCallBanner();
+    this._hideBanner();
 
     const overlay = this.querySelector('#popup-overlay');
     const title = this.querySelector('#popup-title');
-    const placeholder = this.querySelector('#placeholder');
-    const loading = this.querySelector('#loading');
-    const loadingStatus = this.querySelector('#loading-status');
+    const statusOverlay = this.querySelector('#status-overlay');
+    const statusText = this.querySelector('#status-text');
+    const statusSub = this.querySelector('#status-sub');
     const video = this.querySelector('#video');
 
     const stations = this._getStations();
     const station = stations.find(s => s.stationId === stationId);
 
     if (title && station) title.textContent = station.name;
-    if (overlay) overlay.classList.add('open');
-    if (placeholder) placeholder.style.display = 'none';
+    overlay?.classList.add('open');
+    this._resetOverlay();  // Reset spinner/icon state
+    statusOverlay?.classList.remove('hidden');
+    if (statusText) statusText.textContent = 'Avvio chiamata...';
+    if (statusSub) statusSub.textContent = '';
     if (video) video.style.display = 'none';
-    if (loading) loading.style.display = 'flex';
-    if (loadingStatus) loadingStatus.textContent = 'Avvio chiamata video...';
 
-    // Find the view video button dynamically
+    // Start video call
     const buttonEntity = this._getViewVideoButton(stationId);
-    if (!buttonEntity) {
-      console.error('View video button not found for station', stationId);
-      if (loadingStatus) loadingStatus.textContent = 'Button non trovato';
+    try {
+      if (statusText) statusText.textContent = 'Connessione al citofono...';
+      await this._hass.callService('button', 'press', { entity_id: buttonEntity });
+      if (statusSub) statusSub.textContent = 'Attesa risposta...';
+    } catch (e) {
+      if (statusText) statusText.textContent = 'Errore connessione';
       return;
     }
 
-    try {
-      if (loadingStatus) loadingStatus.textContent = 'Connessione al posto esterno...';
-      await this._hass.callService('button', 'press', { entity_id: buttonEntity });
-      if (loadingStatus) loadingStatus.textContent = 'In attesa dello stream video...';
-    } catch (e) {
-      console.error('Failed to start video call:', e);
-      if (loadingStatus) loadingStatus.textContent = 'Errore di connessione';
-    }
-
-    this._pollForHls(stationId);
+    // Poll for WebRTC stream
+    this._pollForWebRTC(stationId);
   }
 
-  async _pollForHls(stationId) {
-    const maxAttempts = 40;
+  async _pollForWebRTC(stationId) {
+    const maxAttempts = 30;
     let attempts = 0;
-    const loadingStatus = this.querySelector('#loading-status');
-
-    const errorMessages = {
-      'busy_gateway': 'Posto esterno occupato',
-      'busy_call_in_progress': 'Chiamata già in corso',
-      'not_registered': 'Sistema non connesso',
-      'timeout': 'Timeout connessione',
-      'service_unavailable': 'Servizio non disponibile',
-      'call_failed': 'Chiamata fallita'
-    };
+    const statusText = this.querySelector('#status-text');
+    const statusSub = this.querySelector('#status-sub');
 
     const poll = async () => {
       if (!this._popupOpen || this._activeStation !== stationId) return;
@@ -727,224 +389,172 @@ class BticinoIntercomCard extends HTMLElement {
       const stations = this._getStations();
       const station = stations.find(s => s.stationId === stationId);
 
-      if (station && station.lastError) {
-        const errorMsg = errorMessages[station.lastError] || station.lastError;
-        this._showError(errorMsg, station.lastError === 'busy_gateway');
+      if (station?.lastError) {
+        const errors = {
+          'busy_gateway': { text: 'Citofono occupato', icon: 'mdi:phone-off', sub: 'Un\'altra chiamata è in corso' },
+          'busy_call_in_progress': { text: 'Chiamata in corso', icon: 'mdi:phone-in-talk', sub: 'Attendi che termini la chiamata' },
+          'not_registered': { text: 'Non connesso', icon: 'mdi:wifi-off', sub: 'Verifica la connessione' },
+          'timeout': { text: 'Timeout', icon: 'mdi:timer-off', sub: 'Nessuna risposta dal citofono' },
+          'call_failed': { text: 'Chiamata fallita', icon: 'mdi:phone-cancel', sub: 'Impossibile contattare il citofono' },
+        };
+        const err = errors[station.lastError] || { text: station.lastError, icon: 'mdi:alert-circle', sub: 'Riprova più tardi' };
+        this._showErrorOverlay(err.text, err.sub, err.icon);
         return;
       }
 
-      if (loadingStatus) {
-        const seconds = Math.floor(attempts / 2);
-        if (station && station.hlsAvailable) {
-          loadingStatus.textContent = 'Stream pronto, caricamento...';
-        } else if (attempts < 4) {
-          loadingStatus.textContent = 'Connessione al posto esterno...';
-        } else if (attempts < 10) {
-          loadingStatus.textContent = 'Negoziazione SRTP...';
-        } else {
-          loadingStatus.textContent = `Preparazione video... (${seconds}s)`;
-        }
-      }
-
-      if (station && station.hlsAvailable && station.hlsUrl) {
-        if (loadingStatus) loadingStatus.textContent = 'Avvio riproduzione...';
-        this._startStream(station.hlsUrl);
+      if (station?.streamReady) {
+        if (statusText) statusText.textContent = 'Connessione WebRTC...';
+        await this._startWebRTC(stationId);
         return;
       }
 
       attempts++;
+      if (statusSub) statusSub.textContent = `Preparazione stream... (${attempts}s)`;
+
       if (attempts < maxAttempts) {
-        setTimeout(poll, 500);
+        setTimeout(poll, 1000);
       } else {
-        this._showError('Timeout connessione', false);
+        if (statusText) statusText.textContent = 'Timeout';
+        if (statusSub) statusSub.textContent = 'Stream non disponibile';
       }
     };
 
-    poll();
+    setTimeout(poll, 1000);
   }
 
-  _showError(message, canRetry = false) {
-    const placeholder = this.querySelector('#placeholder');
-    const loading = this.querySelector('#loading');
-
-    if (placeholder) {
-      placeholder.innerHTML = `
-        <ha-icon icon="mdi:video-off" style="color: var(--error-color, #f44336);"></ha-icon>
-        <span style="margin-top: 8px; font-weight: 500;">${message}</span>
-        ${canRetry ? '<span style="font-size: 0.85em; margin-top: 8px; color: #888;">Riprova tra qualche secondo</span>' : ''}
-      `;
-      placeholder.style.display = 'flex';
-    }
-    if (loading) loading.style.display = 'none';
-  }
-
-  _updateVideoStream() {
-    const stations = this._getStations();
-    const station = stations.find(s => s.stationId === this._activeStation);
-
-    if (station && station.hlsAvailable && station.hlsUrl && !this._hlsPlayer) {
-      this._startStream(station.hlsUrl);
-    }
-  }
-
-  _startStream(hlsUrl) {
+  async _startWebRTC(stationId) {
     const video = this.querySelector('#video');
-    const loading = this.querySelector('#loading');
-    const placeholder = this.querySelector('#placeholder');
+    const statusOverlay = this.querySelector('#status-overlay');
+    const statusText = this.querySelector('#status-text');
+    const statusSub = this.querySelector('#status-sub');
 
     if (!video) return;
 
-    const fullUrl = hlsUrl.startsWith('http') ? hlsUrl : `${window.location.origin}${hlsUrl}`;
-
-    this._stopStream();
+    // Use HA proxy endpoint for WebRTC (works with both HTTP and HTTPS)
+    const go2rtcApi = `/api/bticino_hometouch/webrtc/bticino_live_${stationId}`;
 
     try {
-      if (typeof Hls !== 'undefined' && Hls.isSupported()) {
-        this._hlsPlayer = new Hls({
-          enableWorker: true,
-          lowLatencyMode: false,
-          backBufferLength: 30,
-          maxBufferLength: 60,
-          maxMaxBufferLength: 120,
-          maxBufferSize: 60 * 1000 * 1000,
-          maxBufferHole: 2,
-          liveSyncDurationCount: 5,
-          liveMaxLatencyDurationCount: 10,
-          liveDurationInfinity: true,
-          manifestLoadingTimeOut: 15000,
-          manifestLoadingMaxRetry: 5,
-          fragLoadingTimeOut: 30000,
-          fragLoadingMaxRetry: 6,
-        });
+      // Create peer connection
+      this._peerConnection = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      });
 
-        this._hlsPlayer.loadSource(fullUrl);
-        this._hlsPlayer.attachMedia(video);
+      // Handle incoming tracks
+      this._peerConnection.ontrack = (event) => {
+        if (event.streams[0]) {
+          video.srcObject = event.streams[0];
+          video.style.display = 'block';
+          statusOverlay?.classList.add('hidden');
+        }
+      };
 
-        this._hlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => {
-          video.play().catch(e => console.warn('Autoplay blocked:', e));
-        });
+      // Handle connection state
+      this._peerConnection.onconnectionstatechange = () => {
+        if (this._peerConnection.connectionState === 'failed') {
+          if (statusText) statusText.textContent = 'Connessione fallita';
+          statusOverlay?.classList.remove('hidden');
+        } else if (this._peerConnection.connectionState === 'disconnected') {
+          if (statusText) statusText.textContent = 'Disconnesso';
+          if (statusSub) statusSub.textContent = 'Stream terminato';
+          statusOverlay?.classList.remove('hidden');
+        }
+      };
 
-        this._hlsPlayer.on(Hls.Events.FRAG_LOADED, () => {
-          if (loading && loading.style.display !== 'none') {
-            loading.style.display = 'none';
-            video.style.display = 'block';
-          }
-        });
+      // Add transceiver for receiving video
+      this._peerConnection.addTransceiver('video', { direction: 'recvonly' });
 
-        this._hlsPlayer.on(Hls.Events.ERROR, (event, data) => {
-          console.log('HLS error:', data.type, data.details, 'fatal:', data.fatal, 'streamStarted:', this._streamStarted);
+      // Create offer
+      const offer = await this._peerConnection.createOffer();
+      await this._peerConnection.setLocalDescription(offer);
 
-          if (data.fatal) {
-            switch (data.type) {
-              case Hls.ErrorTypes.NETWORK_ERROR:
-                // Check if stream was playing and now we get 404 errors (stream ended)
-                // This happens when gateway closes the call and HLS files are deleted
-                if (this._streamStarted) {
-                  // Any fatal network error after stream started = stream terminated
-                  console.log('Stream was active, showing stream ended message');
-                  this._showStreamEnded();
-                  return;
-                }
-                // Not started yet, try to recover
-                console.log('Stream not started yet, trying to recover...');
-                this._hlsPlayer.startLoad();
-                break;
-              case Hls.ErrorTypes.MEDIA_ERROR:
-                this._hlsPlayer.recoverMediaError();
-                break;
-            }
-          }
-        });
+      if (statusSub) statusSub.textContent = 'Negoziazione SDP...';
 
-        // Track when stream actually starts playing - use multiple events to be sure
-        this._streamStarted = false;
-        this._hlsPlayer.on(Hls.Events.FRAG_LOADED, () => {
-          if (!this._streamStarted) {
-            console.log('Stream started (FRAG_LOADED)');
-            this._streamStarted = true;
-          }
-        });
+      // Send offer to go2rtc and get answer
+      const response = await fetch(go2rtcApi, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'offer', sdp: offer.sdp })
+      });
 
-      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        video.src = fullUrl;
-        video.addEventListener('loadedmetadata', () => {
-          if (loading) loading.style.display = 'none';
-        });
-        video.play().catch(e => console.warn('Autoplay blocked:', e));
+      if (!response.ok) {
+        throw new Error(`go2rtc error: ${response.status}`);
       }
 
-      if (placeholder) placeholder.style.display = 'none';
-      video.style.display = 'block';
+      const answer = await response.json();
+      await this._peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+
+      if (statusSub) statusSub.textContent = 'In attesa del video...';
 
     } catch (e) {
-      console.error('Error starting stream:', e);
+      if (statusText) statusText.textContent = 'Errore WebRTC';
+      if (statusSub) statusSub.textContent = e.message;
+      statusOverlay?.classList.remove('hidden');
     }
   }
 
-  _stopStream() {
-    this._streamStarted = false;
+  _showErrorOverlay(text, sub, icon) {
+    const statusOverlay = this.querySelector('#status-overlay');
+    const statusText = this.querySelector('#status-text');
+    const statusSub = this.querySelector('#status-sub');
+    const spinner = statusOverlay?.querySelector('ha-circular-progress');
 
-    if (this._hlsPlayer) {
-      this._hlsPlayer.destroy();
-      this._hlsPlayer = null;
+    // Hide spinner and show icon
+    if (spinner) spinner.style.display = 'none';
+
+    // Create or update icon element
+    let iconEl = statusOverlay?.querySelector('.status-icon');
+    if (!iconEl && statusOverlay) {
+      iconEl = document.createElement('ha-icon');
+      iconEl.className = 'status-icon';
+      iconEl.style.cssText = '--mdc-icon-size: 48px; color: rgba(255,255,255,0.9);';
+      statusOverlay.insertBefore(iconEl, statusOverlay.firstChild);
     }
+    if (iconEl) iconEl.setAttribute('icon', icon || 'mdi:alert-circle');
 
+    if (statusText) statusText.textContent = text;
+    if (statusSub) statusSub.textContent = sub;
+    statusOverlay?.classList.remove('hidden');
+
+    // Hide video
+    const video = this.querySelector('#video');
+    if (video) video.style.display = 'none';
+  }
+
+  _resetOverlay() {
+    const statusOverlay = this.querySelector('#status-overlay');
+    const spinner = statusOverlay?.querySelector('ha-circular-progress');
+    const iconEl = statusOverlay?.querySelector('.status-icon');
+
+    if (spinner) spinner.style.display = '';
+    if (iconEl) iconEl.remove();
+  }
+
+  _stopWebRTC() {
+    if (this._peerConnection) {
+      this._peerConnection.close();
+      this._peerConnection = null;
+    }
     const video = this.querySelector('#video');
     if (video) {
-      video.pause();
-      video.src = '';
-      video.load();
+      video.srcObject = null;
       video.style.display = 'none';
     }
   }
 
-  _showStreamEnded() {
-    // Stream was terminated by gateway (timeout or hangup)
-    this._stopStream();
-
-    const placeholder = this.querySelector('#placeholder');
-    const loading = this.querySelector('#loading');
-    const bufferingOverlay = this.querySelector('#buffering-overlay');
-
-    if (bufferingOverlay) bufferingOverlay.classList.remove('visible');
-    if (loading) loading.style.display = 'none';
-
-    if (placeholder) {
-      placeholder.innerHTML = `
-        <ha-icon icon="mdi:video-off" style="color: var(--warning-color, #ff9800);"></ha-icon>
-        <span style="margin-top: 8px; font-weight: 500;">Flusso Terminato</span>
-        <span style="font-size: 0.85em; margin-top: 8px; color: #888;">La chiamata è stata chiusa</span>
-      `;
-      placeholder.style.display = 'flex';
-    }
-  }
-
-  _onVideoPlaying() {
-    const loading = this.querySelector('#loading');
-    if (loading) loading.style.display = 'none';
-  }
-
   _closePopup() {
-    this._stopStream();
+    this._stopWebRTC();
     this._popupOpen = false;
     this._activeStation = null;
-
-    const overlay = this.querySelector('#popup-overlay');
-    const bufferingOverlay = this.querySelector('#buffering-overlay');
-
-    if (overlay) overlay.classList.remove('open');
-    if (bufferingOverlay) bufferingOverlay.classList.remove('visible');
+    this.querySelector('#popup-overlay')?.classList.remove('open');
   }
 
   async _hangupAndClose() {
     const hangupButton = this._getHangupButton();
     if (hangupButton) {
       try {
-        await this._hass.callService('button', 'press', {
-          entity_id: hangupButton
-        });
+        await this._hass.callService('button', 'press', { entity_id: hangupButton });
       } catch (e) {
-        console.error('Failed to hangup:', e);
+        // Ignore hangup errors
       }
     }
     this._closePopup();
@@ -955,19 +565,8 @@ class BticinoIntercomCard extends HTMLElement {
     btn.classList.remove('success', 'error');
 
     const unlockButton = this._getUnlockDoorButton(stationId);
-    if (!unlockButton) {
-      console.error('Unlock button not found for station', stationId);
-      btn.classList.remove('waiting');
-      btn.classList.add('error');
-      setTimeout(() => btn.classList.remove('error'), 5000);
-      return;
-    }
-
     try {
-      await this._hass.callService('button', 'press', {
-        entity_id: unlockButton
-      });
-
+      await this._hass.callService('button', 'press', { entity_id: unlockButton });
       setTimeout(() => {
         if (btn.classList.contains('waiting')) {
           btn.classList.remove('waiting');
@@ -975,95 +574,58 @@ class BticinoIntercomCard extends HTMLElement {
           setTimeout(() => btn.classList.remove('error'), 5000);
         }
       }, 10000);
-
     } catch (e) {
-      console.error('Failed to unlock door:', e);
       btn.classList.remove('waiting');
       btn.classList.add('error');
       setTimeout(() => btn.classList.remove('error'), 5000);
     }
   }
 
-  getCardSize() {
-    return 2;
-  }
+  getCardSize() { return 2; }
 }
 
-// Card Editor
+// Editor
 class BticinoIntercomCardEditor extends HTMLElement {
   set hass(hass) { this._hass = hass; }
-
-  setConfig(config) {
-    this._config = config;
-    this._render();
-  }
+  setConfig(config) { this._config = config; this._render(); }
 
   _render() {
     this.innerHTML = `
       <style>
-        .editor-row {
-          margin-bottom: 16px;
-        }
-        .editor-row label {
-          display: block;
-          margin-bottom: 4px;
-          font-weight: 500;
-        }
-        .editor-row input {
-          width: 100%;
-          padding: 8px;
-          border: 1px solid var(--divider-color);
-          border-radius: 4px;
-          background: var(--card-background-color);
-          color: var(--primary-text-color);
-        }
-        .editor-row input[type="checkbox"] {
-          width: auto;
-        }
+        .editor-row { margin-bottom: 16px; }
+        .editor-row label { display: block; margin-bottom: 4px; font-weight: 500; }
+        .editor-row input { width: 100%; padding: 8px; border: 1px solid var(--divider-color); border-radius: 4px; }
+        .editor-row input[type="checkbox"] { width: auto; }
       </style>
-
       <div class="editor-row">
         <label>Titolo</label>
         <input type="text" id="title" value="${this._config.title || 'Citofono'}">
       </div>
-
       <div class="editor-row">
-        <label>
-          <input type="checkbox" id="show_title" ${this._config.show_title !== false ? 'checked' : ''}>
-          Mostra titolo
-        </label>
+        <label><input type="checkbox" id="show_title" ${this._config.show_title !== false ? 'checked' : ''}> Mostra titolo</label>
       </div>
     `;
-
     this.querySelector('#title').addEventListener('input', (e) => this._valueChanged('title', e.target.value));
     this.querySelector('#show_title').addEventListener('change', (e) => this._valueChanged('show_title', e.target.checked));
   }
 
   _valueChanged(key, value) {
-    const newConfig = { ...this._config, [key]: value };
     this.dispatchEvent(new CustomEvent('config-changed', {
-      detail: { config: newConfig },
-      bubbles: true,
-      composed: true
+      detail: { config: { ...this._config, [key]: value } },
+      bubbles: true, composed: true
     }));
   }
 }
 
-// Register components
 customElements.define('bticino-intercom-card', BticinoIntercomCard);
 customElements.define('bticino-intercom-card-editor', BticinoIntercomCardEditor);
 
-// Register with Lovelace
 window.customCards = window.customCards || [];
 window.customCards.push({
   type: 'bticino-intercom-card',
   name: 'BTicino Intercom',
-  description: 'Card compatta per citofono BTicino (solo video, audio non supportato)',
+  description: 'WebRTC video intercom card for BTicino',
   preview: true
 });
 
-console.info(
-  '%c BTICINO-INTERCOM-CARD %c v3.2.1 ',
-  'color: white; background: #03a9f4; font-weight: bold;',
-  'color: #03a9f4; background: white; font-weight: bold;'
-);
+console.info('%c BTICINO-INTERCOM-CARD %c v4.5.0 WebRTC ', 'color: white; background: #03a9f4; font-weight: bold;', 'color: #03a9f4; background: white; font-weight: bold;');

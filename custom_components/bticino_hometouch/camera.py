@@ -110,18 +110,33 @@ class BticinoIntercomCamera(CoordinatorEntity, Camera):
         """Return extra state attributes."""
         state = self.coordinator.get_station_state(self._camera_id)
         last_error = self.coordinator.get_last_error(self._camera_id)
+
+        # Check streaming mode and availability
+        webrtc_mode = self.coordinator.is_webrtc_mode()
+        stream_available = self.coordinator.get_stream_available(self._camera_id)
+
         attrs = {
             "station_id": self._camera_id,
             "station_state": state.value,
             "is_ringing": state == IntercomState.RINGING,
             "is_connected": state == IntercomState.CONNECTED,
             "on_demand": True,
-            "hls_available": self._hls_file_exists(),
             "last_error": last_error,
+            # WebRTC attributes
+            "webrtc_mode": webrtc_mode,
+            "webrtc_available": webrtc_mode and stream_available,
+            # Legacy HLS attributes for backwards compatibility
+            "hls_available": (not webrtc_mode) and stream_available,
         }
-        # Only include hls_url if file exists
-        if self._hls_file_exists():
-            attrs["hls_url"] = self._get_stream_url()
+
+        # Include stream URLs based on mode
+        if stream_available:
+            if webrtc_mode:
+                attrs["webrtc_stream_id"] = f"bticino_live_{self._camera_id}"
+                attrs["go2rtc_api_url"] = self.coordinator.get_go2rtc_api_url()
+            else:
+                attrs["hls_url"] = self._get_stream_url()
+
         return attrs
 
     def _get_stream_url(self) -> str:

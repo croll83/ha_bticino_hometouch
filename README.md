@@ -8,23 +8,29 @@ Custom Home Assistant integration for BTicino Door Entry Touch intercom systems.
 
 | Limitation | Description |
 |------------|-------------|
-| **🔇 No Audio** | Audio is NOT available. The BTicino cloud gateway does not accept audio streams from third-party SIP clients. |
-| **📹 Video Latency** | Video has approximately 8 seconds of latency due to SRTP-to-HLS transcoding. |
-| **📞 On-Demand Only** | Only on-demand video calls initiated from Home Assistant are supported. |
-| **📲 Incoming Calls** | Incoming calls are displayed as a banner notification in the custom card, but cannot be answered with video/audio. Use the official BTicino app for full incoming call handling. |
-| **🔓 Door Unlock Works** | Door unlock commands work reliably, even during incoming calls. |
+| **No Audio** | Audio is NOT available. The BTicino cloud gateway does not accept audio streams from third-party SIP clients. |
+| **Video Latency** | Video has approximately 1-3 seconds of latency (variable depending on network conditions). |
+| **On-Demand Only** | Only on-demand video calls initiated from Home Assistant are supported. |
+| **Incoming Calls** | Incoming calls are displayed as a banner notification in the custom card, but cannot be answered with video/audio. Use the official BTicino app for full incoming call handling. |
+| **Door Unlock Works** | Door unlock commands work reliably, even during incoming calls. |
 
 ## Features
 
 - **Easy Setup**: Just enter your BTicino email and password - no manual certificate extraction needed!
 - **Automatic Provisioning**: The integration automatically creates a dedicated device and obtains TLS certificates
 - **Auto Certificate Renewal**: Certificates are automatically renewed 30 days before expiry
-- **Video Streaming**: View outdoor station cameras on-demand (with ~8s latency)
+- **WebRTC Video Streaming**: Low-latency video via go2rtc with WebRTC
 - **Door Unlock**: Unlock doors directly from Home Assistant
 - **Custom Lovelace Card**: Beautiful card with video popup and door controls
 - **Incoming Call Notification**: Banner displayed when someone rings the doorbell
 - **Doorbell Sensor**: Binary sensor that activates when someone rings
 - **Connection Status**: Binary sensor showing SIP registration status
+
+## Requirements
+
+- Home Assistant 2024.11+ (with built-in go2rtc) **OR** go2rtc add-on installed
+- FFmpeg with libx264 (included in Home Assistant)
+- UDP port 9078 forwarded from your router to Home Assistant
 
 ## Installation
 
@@ -38,6 +44,12 @@ Custom Home Assistant integration for BTicino Door Entry Touch intercom systems.
 
 1. Copy the `custom_components/bticino_hometouch` folder to your Home Assistant's `custom_components` directory
 2. Restart Home Assistant
+
+### go2rtc Setup
+
+The integration automatically configures go2rtc streams on first startup. It adds streams `bticino_live_1` through `bticino_live_10` to your `go2rtc.yaml`.
+
+**After first installation**, restart the go2rtc add-on (or Home Assistant) for the streams to be registered.
 
 ## Configuration
 
@@ -99,7 +111,7 @@ The integration fires these events:
 
 - `bticino_hometouch_incoming_call` - When someone rings the doorbell
 - `bticino_hometouch_door_unlocked` - When a door is successfully unlocked
-- `bticino_hometouch_call_ended` - When a call ends
+- `bticino_hometouch_call_ended` - When a video call ends (stream terminated by gateway)
 
 ## Custom Card Features
 
@@ -107,7 +119,11 @@ The included custom Lovelace card provides:
 
 - **Station Buttons**: View video and unlock door for each station
 - **Incoming Call Banner**: Orange pulsing banner when someone rings
-- **Video Popup**: Full-screen video with loading states and error handling
+- **Video Popup**: Full-screen video with WebRTC streaming
+- **Error Handling**: Specific messages for different error types:
+  - "Citofono occupato" (gateway busy - 486)
+  - "Timeout connessione" (connection timeout - 408)
+  - "Stream terminato" (gateway closed the stream)
 - **Visual Feedback**: Success/error animations for door unlock
 
 ## Example Automation
@@ -121,7 +137,7 @@ automation:
     action:
       - service: notify.mobile_app_your_phone
         data:
-          title: "🔔 Doorbell"
+          title: "Doorbell"
           message: "Someone is at the door"
           data:
             actions:
@@ -134,13 +150,14 @@ automation:
 ### Video Streaming Architecture
 
 ```
-BTicino Gateway -> SRTP (encrypted) -> Home Assistant -> FFmpeg -> HLS -> Browser
+BTicino Gateway -> SRTP (encrypted) -> Home Assistant -> FFmpeg (re-encode) -> RTSP -> go2rtc -> WebRTC -> Browser
 ```
 
-The video path introduces latency due to:
-1. SRTP decryption
-2. H.264 transcoding to HLS segments
-3. HLS buffering for smooth playback
+The video path:
+1. Gateway sends SRTP-encrypted H.264 video to your public IP (port 9078)
+2. FFmpeg decrypts SRTP and re-encodes with frequent keyframes to avoid artifacts
+3. Video is pushed to go2rtc via RTSP
+4. go2rtc serves WebRTC to the browser with low latency
 
 ### Why No Audio?
 
@@ -162,7 +179,16 @@ Make sure you're using the same credentials you use in the Door Entry Touch mobi
 
 1. Check that UDP port 9078 is forwarded to your Home Assistant server
 2. Verify your public IP is correctly configured
-3. Check Home Assistant logs for errors
+3. Check that go2rtc add-on is running
+4. Check Home Assistant logs for errors
+
+### Green artifacts or frozen video
+
+This usually means the keyframe wasn't received. Wait a few seconds for the next keyframe, or restart the stream.
+
+### "Citofono occupato" error
+
+The gateway is busy with another call (possibly from the official app). Wait and try again.
 
 ### Enable Debug Logging
 

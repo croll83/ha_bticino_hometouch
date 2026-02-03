@@ -8,11 +8,11 @@ Questa guida ti mostrerà passo dopo passo come installare e configurare l'integ
 
 | Limitazione | Descrizione |
 |-------------|-------------|
-| **🔇 Niente Audio** | L'audio NON è disponibile. Il gateway cloud BTicino non accetta stream audio da client SIP di terze parti. |
-| **📹 Latenza Video** | Il video ha circa 8 secondi di latenza a causa della transcodifica SRTP→HLS. |
-| **📞 Solo On-Demand** | Sono supportate solo le chiamate video avviate da Home Assistant. |
-| **📲 Chiamate in Arrivo** | Le chiamate in arrivo mostrano un banner nella card, ma non possono essere risposte con video/audio. Usa l'app ufficiale BTicino per gestire le chiamate in arrivo. |
-| **🔓 Sblocco Porte** | I comandi di sblocco porta funzionano perfettamente, anche durante le chiamate in arrivo. |
+| **Niente Audio** | L'audio NON è disponibile. Il gateway cloud BTicino non accetta stream audio da client SIP di terze parti. |
+| **Latenza Video** | Il video ha circa 1-3 secondi di latenza (variabile in base alle condizioni di rete). |
+| **Solo On-Demand** | Sono supportate solo le chiamate video avviate da Home Assistant. |
+| **Chiamate in Arrivo** | Le chiamate in arrivo mostrano un banner nella card, ma non possono essere risposte con video/audio. Usa l'app ufficiale BTicino per gestire le chiamate in arrivo. |
+| **Sblocco Porte** | I comandi di sblocco porta funzionano perfettamente, anche durante le chiamate in arrivo. |
 
 ---
 
@@ -20,11 +20,12 @@ Questa guida ti mostrerà passo dopo passo come installare e configurare l'integ
 
 1. [Prerequisiti](#prerequisiti)
 2. [Installazione](#installazione)
-3. [Configurazione](#configurazione)
-4. [Port Forwarding](#port-forwarding)
-5. [Aggiungere la Card](#aggiungere-la-card)
-6. [Automazioni Opzionali](#automazioni-opzionali)
-7. [Risoluzione Problemi](#risoluzione-problemi)
+3. [Configurazione go2rtc](#configurazione-go2rtc)
+4. [Configurazione Integrazione](#configurazione-integrazione)
+5. [Port Forwarding](#port-forwarding)
+6. [Aggiungere la Card](#aggiungere-la-card)
+7. [Automazioni Opzionali](#automazioni-opzionali)
+8. [Risoluzione Problemi](#risoluzione-problemi)
 
 ---
 
@@ -43,7 +44,8 @@ Questa guida ti mostrerà passo dopo passo come installare e configurare l'integ
 
 ### Requisiti Sistema
 
-- Home Assistant 2024.1 o superiore
+- Home Assistant 2024.11+ (con go2rtc integrato) **OPPURE** add-on go2rtc installato
+- FFmpeg con libx264 (incluso in Home Assistant)
 - HACS installato (consigliato)
 - Accesso al router per configurare il port forwarding
 
@@ -64,12 +66,37 @@ Questa guida ti mostrerà passo dopo passo come installare e configurare l'integ
 
 1. Scarica il repository
 2. Copia la cartella `custom_components/bticino_hometouch` in `/config/custom_components/`
-3. Copia `www/bticino-intercom-card.js` in `/config/www/`
-4. **Riavvia Home Assistant**
+3. **Riavvia Home Assistant**
 
 ---
 
-## Configurazione
+## Configurazione go2rtc
+
+L'integrazione usa go2rtc per lo streaming WebRTC a bassa latenza.
+
+### Auto-configurazione (Automatica)
+
+Al primo avvio, l'integrazione configura automaticamente gli stream in `go2rtc.yaml`:
+- Vengono aggiunti gli stream `bticino_live_1` fino a `bticino_live_10`
+- Questi stream accettano il push RTSP da FFmpeg
+
+**Dopo la prima installazione**, riavvia l'add-on go2rtc (o Home Assistant) per registrare gli stream.
+
+### Verifica Configurazione
+
+Puoi verificare che gli stream siano configurati controllando `/config/go2rtc.yaml`:
+
+```yaml
+streams:
+  bticino_live_1: []
+  bticino_live_2: []
+  bticino_live_3: []
+  # ... fino a bticino_live_10
+```
+
+---
+
+## Configurazione Integrazione
 
 ### Passo 1: Aggiungi l'Integrazione
 
@@ -97,6 +124,7 @@ Clicca "**Submit**" e l'integrazione automaticamente:
 3. ✅ Crea un nuovo dispositivo SIP chiamato "HomeAssistant"
 4. ✅ Genera e ottiene i certificati TLS
 5. ✅ Si registra al server SIP
+6. ✅ Configura gli stream go2rtc
 
 **Fatto!** Le entity sono state create.
 
@@ -135,10 +163,13 @@ Configura il tuo router/firewall per inoltrare la porta UDP 9078:
 
 ### Passo 1: Aggiungi la Resource
 
+La card viene copiata automaticamente in `/config/www/bticino-intercom-card.js` al primo avvio.
+
 1. Vai su **Settings → Dashboards → Resources** (menu ⋮ in alto a destra)
-2. Clicca **Add Resource**
-3. URL: `/local/bticino-intercom-card.js`
-4. Tipo: **JavaScript Module**
+2. Verifica che `/local/bticino-intercom-card.js` sia presente
+3. Se non c'è, clicca **Add Resource**:
+   - URL: `/local/bticino-intercom-card.js`
+   - Tipo: **JavaScript Module**
 
 ### Passo 2: Aggiungi la Card alla Dashboard
 
@@ -157,11 +188,21 @@ La card custom include:
 | Funzione | Descrizione |
 |----------|-------------|
 | **Pulsanti Stazioni** | Un pulsante per ogni posto esterno |
-| **Video Popup** | Clicca per vedere il video in fullscreen |
+| **Video Popup** | Clicca per vedere il video WebRTC in fullscreen |
 | **Sblocco Porta** | Pulsante per aprire la porta |
 | **Banner Chiamata** | Banner arancione pulsante quando qualcuno suona |
 | **Stream Terminato** | Messaggio chiaro quando il gateway chiude la chiamata |
+| **Gestione Errori** | Messaggi specifici per ogni tipo di errore |
 | **Feedback Visivo** | Animazioni per successo/errore sblocco porta |
+
+### Messaggi di Stato
+
+| Stato | Icona | Descrizione |
+|-------|-------|-------------|
+| Citofono occupato | mdi:phone-off | Il gateway è occupato (486) |
+| Timeout connessione | mdi:timer-off | La connessione non è riuscita (408) |
+| Stream terminato | mdi:video-off | Il gateway ha chiuso lo stream |
+| Chiamata fallita | mdi:phone-cancel | Errore generico |
 
 ---
 
@@ -195,7 +236,7 @@ automation:
     action:
       - service: notify.mobile_app_tuo_telefono  # Sostituisci con il tuo
         data:
-          title: "🔔 Citofono"
+          title: "Citofono"
           message: "Chiamata da {{ trigger.event.data.station_name | default('Posto Esterno') }}"
           data:
             tag: citofono
@@ -228,7 +269,8 @@ automation:
 
 1. ✅ Verifica che il port forwarding UDP 9078 sia configurato correttamente
 2. ✅ Verifica che l'IP pubblico nella configurazione sia corretto
-3. ✅ Controlla i log di Home Assistant per errori SIP
+3. ✅ Verifica che go2rtc sia attivo e funzionante
+4. ✅ Controlla i log di Home Assistant per errori
 
 ### "Email o password non validi"
 
@@ -240,14 +282,20 @@ automation:
 - Questo indica che il **port forwarding non è configurato** correttamente
 - Il gateway riesce a comunicare via SIP ma non può inviare il video
 
-### Il video mostra "Buffering" e poi si ferma
+### Video verde o artefatti
 
-- Questo è normale: dopo ~30 secondi il gateway chiude la chiamata
-- La card mostrerà "Flusso Terminato"
+- Questo succede quando il player non riceve il keyframe iniziale
+- Aspetta qualche secondo oppure riavvia lo stream
+- Il re-encoding con FFmpeg minimizza questo problema
+
+### "Citofono occupato" (errore 486)
+
+- Il gateway è impegnato in un'altra chiamata (forse dall'app ufficiale)
+- Aspetta e riprova
 
 ### Banner chiamata in arrivo non appare
 
-- Verifica che la card sia la versione 3.1 o superiore
+- Verifica che la card sia la versione 4.5 o superiore
 - Fai hard refresh del browser (Ctrl+Shift+R)
 - Controlla la console del browser per errori
 
@@ -272,7 +320,21 @@ L'integrazione genera questi eventi Home Assistant:
 |--------|-------------|------|
 | `bticino_hometouch_incoming_call` | Qualcuno ha suonato | `station_id`, `station_name`, `call_id` |
 | `bticino_hometouch_door_unlocked` | Porta sbloccata | `lock_id` |
-| `bticino_hometouch_call_ended` | Chiamata terminata | `call_id` |
+| `bticino_hometouch_call_ended` | Chiamata terminata (stream chiuso dal gateway) | `station_id`, `call_id` |
+
+---
+
+## Architettura Video
+
+```
+BTicino Gateway → SRTP (criptato) → Home Assistant → FFmpeg (re-encode) → RTSP → go2rtc → WebRTC → Browser
+```
+
+Il flusso video:
+1. Il gateway invia video SRTP-criptato H.264 al tuo IP pubblico (porta 9078)
+2. FFmpeg decripta SRTP e ri-codifica con keyframe frequenti per evitare artefatti
+3. Il video viene inviato a go2rtc via RTSP
+4. go2rtc serve WebRTC al browser con bassa latenza
 
 ---
 
