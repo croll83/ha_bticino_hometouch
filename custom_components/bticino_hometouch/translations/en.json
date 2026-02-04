@@ -42,10 +42,16 @@
         "data": {
           "num_cameras": "Number of Outdoor Stations",
           "num_locks": "Number of Locks",
-          "gateway_address": "Gateway Local IP Address (optional)"
+          "lock_addresses": "Lock Addresses",
+          "gateway_address": "Gateway Local IP",
+          "public_ip": "Public IP (NAT)"
         },
         "data_description": {
-          "gateway_address": "Local IP address of your gateway, if known"
+          "num_cameras": "How many cameras/outdoor stations in your system",
+          "num_locks": "How many locks/door openers you have (e.g. gate, main door, apartment door)",
+          "lock_addresses": "Full OpenWebNet addresses. Format: Gateway_ID + Lock_Address. E.g. if gateway ID is '2' and locks have addresses 0, 1, 6 → enter '20, 21, 26'",
+          "gateway_address": "Local IP of BTicino gateway on your network (e.g. 192.168.1.50). Used for direct video connection",
+          "public_ip": "Your public internet IP, needed if HA is behind NAT to receive video. Leave empty for auto-detection"
         }
       }
     }

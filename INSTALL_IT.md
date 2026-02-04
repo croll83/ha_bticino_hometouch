@@ -128,6 +128,42 @@ Clicca "**Submit**" e l'integrazione automaticamente:
 
 **Fatto!** Le entity sono state create.
 
+### Passo 4: Configura gli Indirizzi delle Serrature (Importante!)
+
+Se hai più serrature e non funzionano tutte correttamente, devi configurare gli indirizzi OpenWebNet:
+
+1. Vai su **Settings → Devices & Services → BTicino Hometouch → Configura**
+2. Nel campo **"Indirizzi Serrature"** inserisci gli indirizzi completi
+
+#### Come Trovare gli Indirizzi
+
+Sul tuo gateway BTicino (il videocitofono interno):
+
+1. Vai in **Impostazioni Avanzate → Videocitofonia**
+2. Trova l'**ID del Gateway** (di solito è "2", visibile nelle impostazioni del dispositivo)
+3. Per ogni serratura configurata, nota l'**indirizzo** (es. 0, 1, 6)
+
+#### Calcola l'Indirizzo Completo
+
+L'indirizzo OpenWebNet è: **`{ID_Gateway}{Indirizzo_Serratura}`**
+
+| Serratura | ID Gateway | Indirizzo | Indirizzo Completo |
+|-----------|------------|-----------|-------------------|
+| Porta A   | 2          | 0         | **20**            |
+| Porta B   | 2          | 1         | **21**            |
+| Porta C   | 2          | 6         | **26**            |
+
+#### Esempio di Configurazione
+
+Se hai 3 serrature agli indirizzi 0, 1 e 6 con gateway ID 2:
+
+- Nel campo "Indirizzi Serrature" inserisci: `20, 21, 26`
+
+Questo mapperà:
+- Button "Unlock Door 1" → comando `*8*19*20##`
+- Button "Unlock Door 2" → comando `*8*19*21##`
+- Button "Unlock Door 3" → comando `*8*19*26##`
+
 ---
 
 ## Port Forwarding

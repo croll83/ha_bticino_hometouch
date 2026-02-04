@@ -25,6 +25,7 @@ from .const import (
     CONF_NUM_CAMERAS,
     CONF_NUM_LOCKS,
     CONF_LOCK_COMMANDS,
+    CONF_LOCK_ADDRESSES,
     CONF_APARTMENT_CODE,
     CONF_PUBLIC_IP,
     EVENT_INCOMING_CALL,
@@ -33,6 +34,7 @@ from .const import (
     DEFAULT_NUM_CAMERAS,
     DEFAULT_NUM_LOCKS,
     DEFAULT_APARTMENT_CODE,
+    DEFAULT_LOCK_ADDRESSES,
 )
 from .sip_client import SIPClient, SIPConfig, SIPCall, CallState, MediaMode
 from .media_proxy import MediaProxyManager, BidirectionalAudio
@@ -70,6 +72,7 @@ class BticinoCoordinator(DataUpdateCoordinator):
         self._num_cameras = self._config.get(CONF_NUM_CAMERAS, DEFAULT_NUM_CAMERAS)
         self._num_locks = self._config.get(CONF_NUM_LOCKS, DEFAULT_NUM_LOCKS)
         self._lock_commands = self._config.get(CONF_LOCK_COMMANDS, ["A", "A", "A"])
+        self._lock_addresses = self._config.get(CONF_LOCK_ADDRESSES, DEFAULT_LOCK_ADDRESSES)
 
         # State for each outdoor station/camera
         self._station_states: dict[int, IntercomState] = {
@@ -523,7 +526,16 @@ class BticinoCoordinator(DataUpdateCoordinator):
         else:
             command_type = self._lock_commands[lock_id - 1]
 
-        success = await self._sip_client.send_door_unlock(lock_id, command_type)
+        # Get the actual lock address (OpenWebNet WHERE)
+        # If lock_addresses is configured, use it; otherwise use lock_id
+        if self._lock_addresses and lock_id <= len(self._lock_addresses):
+            lock_address = self._lock_addresses[lock_id - 1]
+            _LOGGER.info("Lock %d -> address %d (from config: %s)", lock_id, lock_address, self._lock_addresses)
+        else:
+            lock_address = lock_id
+            _LOGGER.info("Lock %d -> address %d (using lock_id as address, no config)", lock_id, lock_address)
+
+        success = await self._sip_client.send_door_unlock(lock_address, command_type)
 
         if success:
             # Fire event for UI feedback (200 OK received from door station)

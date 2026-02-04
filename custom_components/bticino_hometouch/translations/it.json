@@ -42,10 +42,16 @@
         "data": {
           "num_cameras": "Numero di Posti Esterni",
           "num_locks": "Numero di Serrature",
-          "gateway_address": "Indirizzo IP Locale del Gateway (opzionale)"
+          "lock_addresses": "Indirizzi Serrature",
+          "gateway_address": "IP Locale Gateway",
+          "public_ip": "IP Pubblico (NAT)"
         },
         "data_description": {
-          "gateway_address": "Indirizzo IP locale del gateway, se conosciuto"
+          "num_cameras": "Quante telecamere/posti esterni hai nel sistema",
+          "num_locks": "Quante serrature/apriporta hai (es. cancello, portone, porta)",
+          "lock_addresses": "Indirizzi OpenWebNet completi. Formato: ID_Gateway + Indirizzo_Serratura. Es: se il gateway ha ID '2' e le serrature hanno indirizzi 0, 1, 6 → inserisci '20, 21, 26'",
+          "gateway_address": "IP locale del gateway BTicino sulla tua rete (es. 192.168.1.50). Serve per la connessione video diretta",
+          "public_ip": "Il tuo IP pubblico internet, necessario se HA è dietro NAT per ricevere il video. Lascia vuoto per auto-rilevamento"
         }
       }
     }

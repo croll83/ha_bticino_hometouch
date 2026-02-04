@@ -465,21 +465,20 @@ class SIPClient:
 
         return "\r\n".join(lines)
 
-    async def send_door_unlock(self, lock_id: int = 1, command_type: str = "A") -> bool:
+    async def send_door_unlock(self, lock_address: int = 1, command_type: str = "A") -> bool:
         """Send door unlock command via SIP MESSAGE.
 
         Args:
-            lock_id: Lock identifier (1, 2, or 3)
+            lock_address: OpenWebNet WHERE address for the lock.
+                          Format from BTicino app: deviceDev + deviceAddr (e.g., 20, 21, 26)
+                          where deviceDev is typically "2" and deviceAddr is 0, 1, 6, etc.
             command_type: "A" for *8*19/*8*20, "B" for *8*21/*8*22
 
         OpenWebNet command format:
             *8*19*<where>## - Open door
             *8*20*<where>## - Close door (release relay)
 
-        Where <where> can be:
-            - Empty: simple installations
-            - Apartment code: for multi-apartment systems
-            - Lock address: specific lock in the system
+        Where <where> is the full address (deviceDev + deviceAddr), e.g., "20", "21", "26"
         """
         # Determine command based on type
         if command_type == "A":
@@ -490,12 +489,9 @@ class SIPClient:
             close_cmd = "*8*22"
 
         # Build the WHERE part of the command
-        # If apartment_code is configured, use it; otherwise try simple format
-        if self._config.apartment_code:
-            where = self._config.apartment_code
-        else:
-            # Try lock_id as the where parameter
-            where = str(lock_id)
+        # The lock_address is the full OpenWebNet address (deviceDev + deviceAddr)
+        # passed from coordinator, e.g., 20, 21, 26
+        where = str(lock_address)
 
         open_message = f"{open_cmd}*{where}##"
         close_message = f"{close_cmd}*{where}##"
@@ -504,7 +500,8 @@ class SIPClient:
         # The MHT (MyHomeTouch) is addressed via the SIP domain
         to_uri = f"{SIP_MHT_PREFIX}{self._config.domain}"
 
-        _LOGGER.debug("Sending door unlock: %s to %s", open_message, to_uri)
+        _LOGGER.info("Sending door unlock: address=%d, where=%s, cmd=%s to %s",
+                    lock_address, where, open_message, to_uri)
 
         try:
             # Send open command and wait for response
@@ -522,7 +519,7 @@ class SIPClient:
                 _LOGGER.error("Failed to send close command")
                 return False
 
-            _LOGGER.debug("Door unlock command sent for lock %d (where=%s)", lock_id, where)
+            _LOGGER.info("Door unlock command sent successfully: address=%d, where=%s", lock_address, where)
             return True
 
         except Exception as e:

@@ -42,12 +42,14 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_CERT_EXPIRY,
     CONF_LOCK_COMMANDS,
+    CONF_LOCK_ADDRESSES,
     CONF_PUBLIC_IP,
     DEFAULT_SIP_SERVER,
     DEFAULT_SIP_PORT,
     DEFAULT_NUM_CAMERAS,
     DEFAULT_NUM_LOCKS,
     DEFAULT_APARTMENT_CODE,
+    DEFAULT_LOCK_ADDRESSES,
 )
 from .bticino_api import BticinoApi, BticinoAuthError, BticinoProvisioningError
 
@@ -194,15 +196,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         config_entry: config_entries.ConfigEntry,
     ) -> config_entries.OptionsFlow:
         """Create the options flow."""
-        return OptionsFlowHandler(config_entry)
+        return OptionsFlowHandler()
 
 
 class OptionsFlowHandler(config_entries.OptionsFlow):
     """Handle options flow for BTicino Hometouch."""
-
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -227,6 +225,18 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 current_commands = current_commands[:new_num_locks]
             new_data[CONF_LOCK_COMMANDS] = current_commands
 
+            # Parse lock addresses from comma-separated string
+            lock_addresses_str = user_input.get(CONF_LOCK_ADDRESSES, "").strip()
+            if lock_addresses_str:
+                try:
+                    lock_addresses = [int(x.strip()) for x in lock_addresses_str.split(",")]
+                    new_data[CONF_LOCK_ADDRESSES] = lock_addresses
+                except ValueError:
+                    _LOGGER.warning("Invalid lock addresses format: %s", lock_addresses_str)
+                    new_data[CONF_LOCK_ADDRESSES] = []
+            else:
+                new_data[CONF_LOCK_ADDRESSES] = []
+
             # Update gateway address if provided
             if user_input.get(CONF_GATEWAY_ADDRESS):
                 new_data[CONF_GATEWAY_ADDRESS] = user_input[CONF_GATEWAY_ADDRESS]
@@ -238,6 +248,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 self.config_entry, data=new_data
             )
             return self.async_create_entry(title="", data={})
+
+        # Convert lock addresses list to comma-separated string for display
+        current_lock_addresses = self.config_entry.data.get(CONF_LOCK_ADDRESSES, [])
+        lock_addresses_str = ", ".join(str(x) for x in current_lock_addresses) if current_lock_addresses else ""
 
         # Show current settings with BOX mode for number inputs
         return self.async_show_form(
@@ -261,6 +275,17 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         NumberSelectorConfig(min=1, max=10, step=1, mode=NumberSelectorMode.BOX)
                     ),
                     vol.Optional(
+                        CONF_LOCK_ADDRESSES,
+                        default=lock_addresses_str,
+                        description={
+                            "suggested_value": lock_addresses_str
+                        },
+                    ): TextSelector(
+                        TextSelectorConfig(
+                            type=TextSelectorType.TEXT,
+                        )
+                    ),
+                    vol.Optional(
                         CONF_GATEWAY_ADDRESS,
                         default=self.config_entry.data.get(CONF_GATEWAY_ADDRESS, ""),
                     ): TextSelector(),
@@ -279,6 +304,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             ),
             description_placeholders={
                 "public_ip_hint": "Your public IP address for video streaming (required for NAT traversal). Leave empty to auto-detect.",
+                "lock_addresses_hint": "OpenWebNet addresses for each lock (comma-separated, e.g. '0, 1, 6'). Leave empty to use lock_id (1, 2, 3...).",
             },
         )
 

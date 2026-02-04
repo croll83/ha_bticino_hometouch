@@ -10,6 +10,9 @@ CONF_NUM_CAMERAS = "num_cameras"
 CONF_NUM_LOCKS = "num_locks"
 CONF_APARTMENT_CODE = "apartment_code"
 
+# Lock addresses - maps lock_id to OpenWebNet address
+CONF_LOCK_ADDRESSES = "lock_addresses"
+
 # Configuration keys - Auto-discovered/generated
 CONF_SIP_SERVER = "sip_server"
 CONF_SIP_PORT = "sip_port"
@@ -39,6 +42,7 @@ DEFAULT_NUM_CAMERAS = 1
 DEFAULT_NUM_LOCKS = 1
 DEFAULT_DEVICE_NAME = "HomeAssistant"
 DEFAULT_APARTMENT_CODE = ""  # Empty means no apartment code in command
+DEFAULT_LOCK_ADDRESSES = []  # Empty means use lock_id as address (1, 2, 3...)
 
 # BTicino API
 BTICINO_API_BASE = "https://www.myhomeweb.com"

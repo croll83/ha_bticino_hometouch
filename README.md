@@ -165,9 +165,29 @@ The BTicino cloud gateway (sipserver.bs.iotleg.com) systematically rejects audio
 
 ### Door Unlock Protocol
 
-Door unlock commands are sent via SIP MESSAGE and work reliably:
-- Lock type A (station 1-5): Commands `*8*19*N##` and `*8*20*N##`
-- Lock type B (station 6-10): Commands `*8*21*N##` and `*8*22*N##`
+Door unlock commands are sent via SIP MESSAGE using OpenWebNet protocol:
+- Lock type A: Commands `*8*19*{WHERE}##` (open) and `*8*20*{WHERE}##` (release)
+- Lock type B: Commands `*8*21*{WHERE}##` (open) and `*8*22*{WHERE}##` (release)
+
+**WHERE Address Format:**
+
+The WHERE address is composed of `{Gateway_ID}{Lock_Address}`:
+- **Gateway ID**: Found in gateway settings (usually "2")
+- **Lock Address**: The address configured for each lock (e.g., 0, 1, 6)
+
+Example: For a gateway with ID `2` and locks at addresses `0`, `1`, `6`:
+- Lock 1 (address 0): WHERE = `20` → command `*8*19*20##`
+- Lock 2 (address 1): WHERE = `21` → command `*8*19*21##`
+- Lock 3 (address 6): WHERE = `26` → command `*8*19*26##`
+
+### How to Find Lock Addresses
+
+1. On the BTicino gateway, go to **Advanced Settings → Videocitofonia (Video Intercom)**
+2. Note the Gateway ID (shown in device settings, typically "2")
+3. For each lock/door opener, note its configured address
+4. Combine them: full address = `{Gateway_ID}{Lock_Address}`
+
+Configure these addresses in the integration options under "Lock Addresses" (comma-separated, e.g., `20, 21, 26`)
 
 ## Troubleshooting
 

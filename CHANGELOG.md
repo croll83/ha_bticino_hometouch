@@ -2,6 +2,26 @@
 
 Tutte le modifiche significative a questo progetto saranno documentate in questo file.
 
+## [4.1.0] - 2026-02-04
+
+### Aggiunto
+
+- **Configurazione indirizzi serrature**: Nuovo campo nelle opzioni dell'integrazione per specificare gli indirizzi OpenWebNet delle serrature. Permette di configurare serrature con indirizzi non sequenziali (es. 0, 1, 6).
+
+### Risolto
+
+- **Fix sblocco porte multiple**: Corretto il formato del comando OpenWebNet per le serrature. Il formato corretto è `*8*19*{gateway_id}{lock_addr}##` (es. `*8*19*20##` per gateway ID 2 e serratura all'indirizzo 0).
+
+### Come trovare gli indirizzi delle serrature
+
+1. Sul gateway BTicino, vai in **Impostazioni Avanzate → Videocitofonia**
+2. Trova l'ID del gateway (solitamente "2")
+3. Per ogni serratura, trova l'indirizzo configurato (es. 0, 1, 6)
+4. L'indirizzo completo è: `{ID_Gateway}{Indirizzo_Serratura}`
+   - Esempio: Gateway ID `2`, Serrature agli indirizzi `0`, `1`, `6` → inserisci `20, 21, 26`
+
+---
+
 ## [4.0.0] - 2026-02-03
 
 ### ⚠️ Breaking Changes
