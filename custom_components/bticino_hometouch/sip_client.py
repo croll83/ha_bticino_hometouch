@@ -53,6 +53,7 @@ class SIPConfig:
     local_port: int = 5060
     apartment_code: str = ""  # OpenWebNet apartment/unit address
     public_ip: str = ""  # Public IP for NAT traversal (used in SDP for media)
+    recipient_user: str = "MHT"  # SIP recipient: MHT (HomeTouch) or c300x (Classe 300X)
 
 
 class MediaMode(Enum):
@@ -498,7 +499,7 @@ class SIPClient:
 
         # Use domain for remote connection, not MAC address
         # The MHT (MyHomeTouch) is addressed via the SIP domain
-        to_uri = f"{SIP_MHT_PREFIX}{self._config.domain}"
+        to_uri = f"sip:{self._config.recipient_user}@{self._config.domain}"
 
         _LOGGER.info("Sending door unlock: address=%d, where=%s, cmd=%s to %s",
                     lock_address, where, open_message, to_uri)
@@ -1318,7 +1319,7 @@ class SIPClient:
             return None
 
         # Build the SIP URI for MHT (MyHomeTouch gateway)
-        to_uri = f"{SIP_MHT_PREFIX}{self._config.domain}"
+        to_uri = f"sip:{self._config.recipient_user}@{self._config.domain}"
 
         # Build DEVADDR for the station
         # Format: deviceDev + deviceAddr (NO PADDING!)

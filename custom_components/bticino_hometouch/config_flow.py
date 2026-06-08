@@ -17,6 +17,10 @@ from homeassistant.helpers.selector import (
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+    SelectOptionDict,
 )
 
 from .const import (
@@ -27,6 +31,11 @@ from .const import (
     CONF_NUM_CAMERAS,
     CONF_NUM_LOCKS,
     CONF_APARTMENT_CODE,
+    CONF_DEVICE_TYPE,
+    DEFAULT_DEVICE_TYPE,
+    DEVICE_TYPE_HOMETOUCH,
+    DEVICE_TYPE_CLASSE300X,
+    PRJ_NAME_BY_TYPE,
     CONF_SIP_SERVER,
     CONF_SIP_PORT,
     CONF_SIP_USERNAME,
@@ -60,6 +69,15 @@ _LOGGER = logging.getLogger(__name__)
 # Using NumberSelector with BOX mode for text input instead of slider
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
+        vol.Required(CONF_DEVICE_TYPE, default=DEFAULT_DEVICE_TYPE): SelectSelector(
+            SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(value=DEVICE_TYPE_HOMETOUCH, label="HomeTouch / Door Entry Touch"),
+                    SelectOptionDict(value=DEVICE_TYPE_CLASSE300X, label="Classe 300X (gates + doorbell)"),
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        ),
         vol.Required(CONF_EMAIL): TextSelector(
             TextSelectorConfig(type=TextSelectorType.EMAIL)
         ),
@@ -89,7 +107,9 @@ async def validate_and_provision(
 
     _LOGGER.info("Starting BTicino provisioning for %s", email)
 
-    async with BticinoApi(email, password) as api:
+    device_type = data.get(CONF_DEVICE_TYPE, DEFAULT_DEVICE_TYPE)
+    prj_name = PRJ_NAME_BY_TYPE.get(device_type, "MHT")
+    async with BticinoApi(email, password, prj_name=prj_name) as api:
         try:
             result = await api.provision_device(
                 gateway_mac=data.get(CONF_GATEWAY_MAC),
@@ -116,6 +136,7 @@ async def validate_and_provision(
     # Return full configuration
     return {
         # User input (stored for re-provisioning/renewal)
+        CONF_DEVICE_TYPE: device_type,
         CONF_EMAIL: email,
         CONF_PASSWORD: password,
         CONF_GATEWAY_MAC: data.get(CONF_GATEWAY_MAC, ""),

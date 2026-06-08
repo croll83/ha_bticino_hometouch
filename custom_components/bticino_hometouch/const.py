@@ -85,3 +85,12 @@ ATTR_CALLER_ID = "caller_id"
 
 # Certificate renewal
 CERT_RENEWAL_DAYS_BEFORE_EXPIRY = 30
+
+# Device type: HomeTouch (default) vs Classe 300X
+CONF_DEVICE_TYPE = "device_type"
+DEVICE_TYPE_HOMETOUCH = "hometouch"
+DEVICE_TYPE_CLASSE300X = "classe300x"
+DEFAULT_DEVICE_TYPE = DEVICE_TYPE_HOMETOUCH
+# prj_name header + SIP recipient user per device type
+PRJ_NAME_BY_TYPE = {DEVICE_TYPE_HOMETOUCH: "MHT", DEVICE_TYPE_CLASSE300X: "C3X"}
+SIP_RECIPIENT_BY_TYPE = {DEVICE_TYPE_HOMETOUCH: "MHT", DEVICE_TYPE_CLASSE300X: "c300x"}

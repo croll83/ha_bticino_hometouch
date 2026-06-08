@@ -2,6 +2,18 @@
 
 Custom Home Assistant integration for BTicino Door Entry Touch intercom systems.
 
+## 📟 Classe 300X support
+
+This integration **also works with the BTicino Classe 300X / 300X13E** video door entry (the legacy *DOOR ENTRY* app family). Select **Device type → Classe 300X** during setup.
+
+For the Classe 300X, support is limited to:
+
+- ✅ **Door / gate unlock** (e.g. pedestrian + driveway gates) — works reliably, locally **and** remotely.
+- ✅ **Doorbell / incoming-call sensor**.
+- ❌ **Camera / video is NOT supported** on the 300X (different media path — it did not work).
+
+Setup is identical: just enter your BTicino account **email + password**. The integration auto-provisions a dedicated device and TLS certificate for the 300X realm (no root, no emulator, no manual certificate extraction). Set **Number of locks** to match your gates (e.g. `2`) and, if the default addresses don't match, set the lock addresses in the integration options (OpenWebNet WHERE, e.g. `20, 22`).
+
 ## ⚠️ Known Limitations
 
 **Please read carefully before installing:**

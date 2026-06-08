@@ -62,10 +62,11 @@ class ProvisioningResult:
 class BticinoApi:
     """BTicino MyHomeWeb API client."""
 
-    def __init__(self, email: str, password: str) -> None:
+    def __init__(self, email: str, password: str, prj_name: str = "MHT") -> None:
         """Initialize the API client."""
         self._email = email
         self._password = password
+        self._prj_name = prj_name
         self._auth_token: str | None = None
         self._session: aiohttp.ClientSession | None = None
 
@@ -84,7 +85,7 @@ class BticinoApi:
         """Get API request headers."""
         headers = {
             "Content-Type": "application/json",
-            "prj_name": "MHT",
+            "prj_name": self._prj_name,
         }
         if self._auth_token:
             headers["auth_token"] = self._auth_token

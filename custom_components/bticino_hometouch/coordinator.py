@@ -37,6 +37,7 @@ from .const import (
     DEFAULT_LOCK_ADDRESSES,
 )
 from .sip_client import SIPClient, SIPConfig, SIPCall, CallState, MediaMode
+from .const import CONF_DEVICE_TYPE, DEFAULT_DEVICE_TYPE, SIP_RECIPIENT_BY_TYPE
 from .media_proxy import MediaProxyManager, BidirectionalAudio
 
 _LOGGER = logging.getLogger(__name__)
@@ -173,6 +174,7 @@ class BticinoCoordinator(DataUpdateCoordinator):
             ca_cert=self._config[CONF_CA_CERT],
             apartment_code=self._config.get(CONF_APARTMENT_CODE, DEFAULT_APARTMENT_CODE),
             public_ip=public_ip,
+            recipient_user=SIP_RECIPIENT_BY_TYPE.get(self._config.get(CONF_DEVICE_TYPE, DEFAULT_DEVICE_TYPE), "MHT"),
         )
 
         self._sip_client = SIPClient(
