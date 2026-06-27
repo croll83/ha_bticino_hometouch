@@ -505,22 +505,43 @@ class BticinoCoordinator(DataUpdateCoordinator):
             },
         )
 
+    async def _ensure_sip_ready(self, force: bool = False) -> bool:
+        """Make sure the SIP client is connected & registered before a command.
+
+        If the connection is stale (or force=True) tear it down and reconnect
+        synchronously, so commands aren't sent into a dead TLS socket — this is
+        what makes the door open reliably instead of ~1 in 50 times.
+        """
+        if not self._sip_client:
+            return False
+        if not force and self._sip_client.is_healthy:
+            return True
+        _LOGGER.info(
+            "Reconnecting SIP before command (force=%s, registered=%s, connected=%s, age=%.0fs)",
+            force, self._sip_client.is_registered,
+            self._sip_client.is_connected, self._sip_client.connection_age,
+        )
+        try:
+            await self._sip_client.disconnect()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("disconnect during ensure_sip_ready raised: %s", err)
+        try:
+            return bool(await self._sip_client.connect() and await self._sip_client.register())
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.error("SIP reconnect failed: %s", err)
+            return False
+
     async def async_unlock_door(self, lock_id: int) -> bool:
         """Unlock a door."""
         if not self._sip_client:
             _LOGGER.error("SIP client not initialized")
             return False
 
-        # Check if connection is healthy, not just registered
-        if not self._sip_client.is_healthy:
-            _LOGGER.warning(
-                "SIP connection unhealthy (registered=%s, connected=%s, age=%.0fs). "
-                "Attempting command anyway...",
-                self._sip_client.is_registered,
-                self._sip_client.is_connected,
-                self._sip_client.connection_age
-            )
-            # Don't fail immediately - let the command try and potentially trigger reconnect
+        # Ensure a live, registered SIP connection before sending — a stale TLS
+        # socket (registered=True but dead) would otherwise swallow the command.
+        if not await self._ensure_sip_ready():
+            _LOGGER.error("Cannot unlock door %d: SIP reconnect failed", lock_id)
+            return False
 
         # Get command type for this lock
         if lock_id < 1 or lock_id > len(self._lock_commands):
@@ -538,6 +559,13 @@ class BticinoCoordinator(DataUpdateCoordinator):
             _LOGGER.info("Lock %d -> address %d (using lock_id as address, no config)", lock_id, lock_address)
 
         success = await self._sip_client.send_door_unlock(lock_address, command_type)
+
+        if not success:
+            # Stale-but-"healthy" case: force a fresh reconnect and retry once,
+            # mirroring how the BTicino app re-registers on every open.
+            _LOGGER.warning("Door %d unlock failed, forcing reconnect and retrying once", lock_id)
+            if await self._ensure_sip_ready(force=True):
+                success = await self._sip_client.send_door_unlock(lock_address, command_type)
 
         if success:
             # Fire event for UI feedback (200 OK received from door station)

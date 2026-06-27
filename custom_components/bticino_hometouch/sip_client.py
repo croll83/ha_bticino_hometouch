@@ -108,7 +108,7 @@ class SIPClient:
     HEARTBEAT_INTERVAL = 30  # Seconds between heartbeat OPTIONS
     RECONNECT_BASE_DELAY = 3  # Initial delay for reconnect
     RECONNECT_MAX_DELAY = 300  # Maximum delay (5 minutes)
-    RECONNECT_MAX_ATTEMPTS = 10  # Maximum consecutive reconnect attempts before giving up
+    RECONNECT_MAX_ATTEMPTS = 10  # After this many failures: warn once, then keep retrying forever
 
     def __init__(
         self,
@@ -323,23 +323,26 @@ class SIPClient:
     async def _auto_reconnect(self):
         """Automatically reconnect to SIP server after connection loss.
 
-        Uses exponential backoff with jitter to avoid thundering herd.
-        Gives up after RECONNECT_MAX_ATTEMPTS consecutive failures.
+        Uses exponential backoff with jitter to avoid thundering herd. Never gives
+        up: after RECONNECT_MAX_ATTEMPTS it keeps retrying at the max interval, so
+        the link self-heals when the network/server returns without needing an HA
+        restart (a long power outage / absence must not leave it permanently dead).
         """
         self._reconnect_attempts += 1
 
-        if self._reconnect_attempts > self.RECONNECT_MAX_ATTEMPTS:
-            _LOGGER.error(
-                "Giving up auto-reconnect after %d consecutive failures. "
-                "Manual intervention required (restart HA or reload integration).",
-                self.RECONNECT_MAX_ATTEMPTS
+        # Warn once when we cross the "many failures" threshold, then keep going.
+        if self._reconnect_attempts == self.RECONNECT_MAX_ATTEMPTS:
+            _LOGGER.warning(
+                "SIP auto-reconnect still failing after %d attempts; will keep "
+                "retrying every ~%ds until it recovers.",
+                self.RECONNECT_MAX_ATTEMPTS, self.RECONNECT_MAX_DELAY,
             )
-            self._registration_state = RegistrationState.FAILED
-            return
 
-        # Calculate delay with exponential backoff + jitter
+        # Exponential backoff (exponent capped to avoid huge ints) + jitter,
+        # clamped to RECONNECT_MAX_DELAY.
+        exp = min(self._reconnect_attempts - 1, 8)
         delay = min(
-            self.RECONNECT_BASE_DELAY * (2 ** (self._reconnect_attempts - 1)),
+            self.RECONNECT_BASE_DELAY * (2 ** exp),
             self.RECONNECT_MAX_DELAY
         )
         # Add random jitter (±25%)
@@ -347,8 +350,8 @@ class SIPClient:
         delay = delay + jitter
 
         _LOGGER.info(
-            "Auto-reconnect attempt %d/%d in %.1f seconds...",
-            self._reconnect_attempts, self.RECONNECT_MAX_ATTEMPTS, delay
+            "Auto-reconnect attempt %d in %.1f seconds...",
+            self._reconnect_attempts, delay
         )
 
         await asyncio.sleep(delay)
