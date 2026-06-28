@@ -105,6 +105,8 @@ class SIPClient:
 
     # Connection health constants
     RECEIVE_TIMEOUT = 120  # Seconds to wait for any data before considering connection dead
+    MAX_BUFFER_BYTES = 1024 * 1024  # 1 MB cap on the SIP receive buffer: control messages
+    #                                 are KB; beyond this = stream/garbage → reset (avoid OOM)
     HEARTBEAT_INTERVAL = 30  # Seconds between heartbeat OPTIONS
     RECONNECT_BASE_DELAY = 3  # Initial delay for reconnect
     RECONNECT_MAX_DELAY = 300  # Maximum delay (5 minutes)
@@ -781,6 +783,17 @@ class SIPClient:
                 # Update timestamp on successful data receive
                 self._last_data_received = time.time()
                 buffer += data
+
+                # Hard cap: SIP control messages are tiny. If the buffer grows past
+                # MAX_BUFFER_BYTES without yielding a complete message, the socket is
+                # receiving a stream/garbage — drop it instead of ballooning to GB (OOM).
+                if len(buffer) > self.MAX_BUFFER_BYTES:
+                    _LOGGER.warning(
+                        "SIP buffer reached %d bytes without a complete message — "
+                        "resetting (stream/garbage on control socket)", len(buffer)
+                    )
+                    buffer = b""
+                    continue
 
                 # Parse complete messages
                 while b"\r\n\r\n" in buffer:
