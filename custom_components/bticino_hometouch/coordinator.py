@@ -522,11 +522,18 @@ class BticinoCoordinator(DataUpdateCoordinator):
             self._sip_client.is_connected, self._sip_client.connection_age,
         )
         try:
-            await self._sip_client.disconnect()
+            await asyncio.wait_for(self._sip_client.disconnect(), timeout=8)
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("disconnect during ensure_sip_ready raised: %s", err)
         try:
-            return bool(await self._sip_client.connect() and await self._sip_client.register())
+            # Timeout complessivo: un comando che fallisce in <30s lascia
+            # proseguire le automazioni (continue_on_error); un hang qui
+            # bloccava 'Rientro a casa' per 14 minuti.
+            return bool(await asyncio.wait_for(self._sip_client.connect(), timeout=20)
+                        and await asyncio.wait_for(self._sip_client.register(), timeout=15))
+        except (TimeoutError, asyncio.TimeoutError):
+            _LOGGER.error("SIP reconnect timed out")
+            return False
         except Exception as err:  # noqa: BLE001
             _LOGGER.error("SIP reconnect failed: %s", err)
             return False

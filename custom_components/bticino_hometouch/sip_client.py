@@ -212,7 +212,8 @@ class SIPClient:
         if self._writer:
             try:
                 self._writer.close()
-                await self._writer.wait_closed()
+                # wait_closed su un socket TLS morto puo' non tornare mai
+                await asyncio.wait_for(self._writer.wait_closed(), timeout=5)
             except Exception:
                 pass
             self._writer = None
@@ -254,11 +255,17 @@ class SIPClient:
 
             ssl_context = await loop.run_in_executor(None, _create_ssl_context)
 
-            # Connect
-            self._reader, self._writer = await asyncio.open_connection(
-                self._config.server,
-                self._config.port,
-                ssl=ssl_context,
+            # Connect — timeout esplicito: verso un gateway che non risponde
+            # (spento, lockout anti-bruteforce, rete giù) open_connection può
+            # restare appeso per minuti a livello kernel e bloccare chi chiama
+            # (es. l'automazione Rientro che preme il carrabile).
+            self._reader, self._writer = await asyncio.wait_for(
+                asyncio.open_connection(
+                    self._config.server,
+                    self._config.port,
+                    ssl=ssl_context,
+                ),
+                timeout=15,
             )
 
             self._running = True
@@ -317,7 +324,11 @@ class SIPClient:
 
         if self._writer:
             self._writer.close()
-            await self._writer.wait_closed()
+            try:
+                # wait_closed su un socket TLS morto puo' non tornare mai
+                await asyncio.wait_for(self._writer.wait_closed(), timeout=5)
+            except (TimeoutError, asyncio.TimeoutError, Exception):
+                pass
 
         self._registration_state = RegistrationState.UNREGISTERED
         _LOGGER.info("Disconnected from SIP server")
