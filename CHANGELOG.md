@@ -2,6 +2,16 @@
 
 Tutte le modifiche significative a questo progetto saranno documentate in questo file.
 
+## [4.5.1] - 2026-10-14
+
+### Risolto
+
+- **OOM di HA Core ogni ~24 ore**: ogni risposta 200 a un REGISTER avviava un nuovo loop di ri-registrazione orario senza fermare il precedente. Anche i REGISTER inviati dai loop ricevono 200, quindi i loop raddoppiavano ogni ora (1, 2, 4, ... milioni dopo un giorno) finché il kernel non uccideva HA Core per memoria esaurita. Ora parte un loop solo se non ce n'è già uno vivo.
+- **Riconnessioni duplicate**: receive loop, loop di ri-registrazione e `force_reconnect` potevano avviare ognuno la propria catena di auto-reconnect, ciascuna con la sua connessione TLS e i suoi task. Ora l'auto-reconnect è un unico loop (single-flight) e `connect()` ferma anche l'heartbeat precedente.
+- **Riconnessione dopo lo stop**: `async_stop_sip` ora chiude il client in modo intenzionale e annulla un auto-reconnect in attesa, che altrimenti ricollegava un client non più usato.
+
+---
+
 ## [4.1.0] - 2026-02-04
 
 ### Aggiunto

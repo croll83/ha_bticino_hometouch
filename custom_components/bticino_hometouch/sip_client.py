@@ -134,6 +134,7 @@ class SIPClient:
         self._recv_task: asyncio.Task | None = None
         self._register_task: asyncio.Task | None = None
         self._heartbeat_task: asyncio.Task | None = None  # Proactive heartbeat task
+        self._reconnect_task: asyncio.Task | None = None  # Single-flight auto-reconnect
         self._intentional_disconnect = False  # Track if disconnect is intentional (for 407 auth)
         self._reconnect_attempts = 0  # Track consecutive reconnect attempts
         self._last_data_received = 0.0  # Timestamp of last data received
@@ -207,6 +208,12 @@ class SIPClient:
             except asyncio.CancelledError:
                 pass
             self._recv_task = None
+
+        # Same for the heartbeat: otherwise every reconnect leaves one more loop
+        # running against the shared _running flag
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            self._heartbeat_task = None
 
         # Close existing connection if any
         if self._writer:
@@ -301,6 +308,16 @@ class SIPClient:
         self._intentional_disconnect = intentional
         self._running = False
 
+        # An intentional stop must also stop a pending auto-reconnect, otherwise
+        # it reconnects a client nobody owns anymore (e.g. after unload)
+        if (
+            intentional
+            and self._reconnect_task
+            and not self._reconnect_task.done()
+            and self._reconnect_task is not asyncio.current_task()
+        ):
+            self._reconnect_task.cancel()
+
         if self._recv_task:
             self._recv_task.cancel()
             try:
@@ -333,6 +350,18 @@ class SIPClient:
         self._registration_state = RegistrationState.UNREGISTERED
         _LOGGER.info("Disconnected from SIP server")
 
+    def _schedule_reconnect(self):
+        """Start the auto-reconnect loop unless one is already running.
+
+        Receive loop, re-register loop and force_reconnect can all detect the same
+        dead connection: without this guard each one started its own reconnect
+        chain, and each chain its own connection and tasks.
+        """
+        if self._reconnect_task and not self._reconnect_task.done():
+            _LOGGER.debug("Auto-reconnect already in progress")
+            return
+        self._reconnect_task = asyncio.create_task(self._auto_reconnect())
+
     async def _auto_reconnect(self):
         """Automatically reconnect to SIP server after connection loss.
 
@@ -340,62 +369,59 @@ class SIPClient:
         up: after RECONNECT_MAX_ATTEMPTS it keeps retrying at the max interval, so
         the link self-heals when the network/server returns without needing an HA
         restart (a long power outage / absence must not leave it permanently dead).
+        Runs as a single loop (see _schedule_reconnect).
         """
-        self._reconnect_attempts += 1
+        while True:
+            self._reconnect_attempts += 1
 
-        # Warn once when we cross the "many failures" threshold, then keep going.
-        if self._reconnect_attempts == self.RECONNECT_MAX_ATTEMPTS:
-            _LOGGER.warning(
-                "SIP auto-reconnect still failing after %d attempts; will keep "
-                "retrying every ~%ds until it recovers.",
-                self.RECONNECT_MAX_ATTEMPTS, self.RECONNECT_MAX_DELAY,
+            # Warn once when we cross the "many failures" threshold, then keep going.
+            if self._reconnect_attempts == self.RECONNECT_MAX_ATTEMPTS:
+                _LOGGER.warning(
+                    "SIP auto-reconnect still failing after %d attempts; will keep "
+                    "retrying every ~%ds until it recovers.",
+                    self.RECONNECT_MAX_ATTEMPTS, self.RECONNECT_MAX_DELAY,
+                )
+
+            # Exponential backoff (exponent capped to avoid huge ints) + jitter,
+            # clamped to RECONNECT_MAX_DELAY.
+            exp = min(self._reconnect_attempts - 1, 8)
+            delay = min(
+                self.RECONNECT_BASE_DELAY * (2 ** exp),
+                self.RECONNECT_MAX_DELAY
+            )
+            # Add random jitter (±25%)
+            jitter = delay * 0.25 * (random.random() * 2 - 1)
+            delay = delay + jitter
+
+            _LOGGER.info(
+                "Auto-reconnect attempt %d in %.1f seconds...",
+                self._reconnect_attempts, delay
             )
 
-        # Exponential backoff (exponent capped to avoid huge ints) + jitter,
-        # clamped to RECONNECT_MAX_DELAY.
-        exp = min(self._reconnect_attempts - 1, 8)
-        delay = min(
-            self.RECONNECT_BASE_DELAY * (2 ** exp),
-            self.RECONNECT_MAX_DELAY
-        )
-        # Add random jitter (±25%)
-        jitter = delay * 0.25 * (random.random() * 2 - 1)
-        delay = delay + jitter
+            await asyncio.sleep(delay)
 
-        _LOGGER.info(
-            "Auto-reconnect attempt %d in %.1f seconds...",
-            self._reconnect_attempts, delay
-        )
+            if self._running:
+                # Already running again (manual reconnect?), skip
+                _LOGGER.debug("Already running, skipping auto-reconnect")
+                return
 
-        await asyncio.sleep(delay)
-
-        if self._running:
-            # Already running again (manual reconnect?), skip
-            _LOGGER.debug("Already running, skipping auto-reconnect")
-            return
-
-        try:
-            if await self.connect():
-                if await self.register():
-                    _LOGGER.info(
-                        "Successfully reconnected and re-registered after %d attempts",
-                        self._reconnect_attempts
-                    )
-                    # Reset counter on success (done in connect() but be explicit)
-                    self._reconnect_attempts = 0
-                    return
+            try:
+                if await self.connect():
+                    if await self.register():
+                        _LOGGER.info(
+                            "Successfully reconnected and re-registered after %d attempts",
+                            self._reconnect_attempts
+                        )
+                        # Reset counter on success (done in connect() but be explicit)
+                        self._reconnect_attempts = 0
+                        return
+                    else:
+                        _LOGGER.error("Reconnected but failed to register, will retry")
                 else:
-                    _LOGGER.error("Reconnected but failed to register, will retry")
-            else:
-                _LOGGER.error("Failed to reconnect to SIP server, will retry")
+                    _LOGGER.error("Failed to reconnect to SIP server, will retry")
 
-            # Schedule next attempt
-            asyncio.create_task(self._auto_reconnect())
-
-        except Exception as e:
-            _LOGGER.error("Error during auto-reconnect: %s", e)
-            # Schedule next attempt
-            asyncio.create_task(self._auto_reconnect())
+            except Exception as e:
+                _LOGGER.error("Error during auto-reconnect: %s", e)
 
     async def register(self) -> bool:
         """Register with SIP server."""
@@ -857,7 +883,7 @@ class SIPClient:
         # Only try to reconnect if this wasn't an intentional disconnect
         if not self._intentional_disconnect:
             _LOGGER.info("Connection lost unexpectedly, will attempt auto-reconnect")
-            asyncio.create_task(self._auto_reconnect())
+            self._schedule_reconnect()
         else:
             _LOGGER.debug("Intentional disconnect, skipping auto-reconnect")
 
@@ -919,8 +945,11 @@ class SIPClient:
             self._auth_attempts = 0
             _LOGGER.info("Successfully registered with SIP server")
 
-            # Schedule re-registration
-            self._register_task = asyncio.create_task(self._reregister_loop())
+            # Schedule re-registration, only if no loop is alive: the loop's own
+            # hourly REGISTER also gets a 200 here, and starting a new loop each
+            # time doubled them every hour until HA Core was OOM-killed
+            if self._register_task is None or self._register_task.done():
+                self._register_task = asyncio.create_task(self._reregister_loop())
 
         elif status_code == 401:
             # Track auth attempts to prevent infinite loops
@@ -1318,7 +1347,7 @@ class SIPClient:
                 )
                 self._running = False
                 self._registration_state = RegistrationState.UNREGISTERED
-                asyncio.create_task(self._auto_reconnect())
+                self._schedule_reconnect()
                 break
 
     async def initiate_call(
@@ -1954,9 +1983,9 @@ class SIPClient:
         _LOGGER.info("Forcing reconnection to SIP server...")
         self._intentional_disconnect = False  # Allow auto-reconnect
         await self.disconnect()
-        # Auto-reconnect will be triggered by receive_loop exit
-        # But we can also trigger it directly
-        asyncio.create_task(self._auto_reconnect())
+        # Auto-reconnect is also triggered by the receive_loop exit; the
+        # single-flight guard makes the two triggers start one loop only
+        self._schedule_reconnect()
 
     @property
     def active_calls(self) -> list[SIPCall]:

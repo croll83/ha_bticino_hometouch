@@ -195,7 +195,8 @@ class BticinoCoordinator(DataUpdateCoordinator):
     async def async_stop_sip(self):
         """Stop the SIP client and media proxy."""
         if self._sip_client:
-            await self._sip_client.disconnect()
+            # intentional: no auto-reconnect of a client that is being dropped
+            await self._sip_client.disconnect(intentional=True)
             self._sip_client = None
 
         if self._media_proxy:
